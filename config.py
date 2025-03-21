@@ -5,6 +5,11 @@ Configuration settings for face landmark detection and processing
 # Default landmarks for face contour
 DEFAULT_FACE_CONTOUR_LANDMARKS = [168, 417, 465, 429, 423, 391, 393, 164, 167, 165, 203, 209, 245, 193, 168]
 
+# File system settings
+DEFAULT_FILE_SETTINGS = {
+    'DEFAULT_MESH_FOLDER': "D:/OneDrive/Desktop/masque/faces",  # Default folder for mesh files
+}
+
 # Visualization settings
 DEFAULT_VISUALIZATION_SETTINGS = {
     'SHOW_LANDMARKS_2D': False,  # Show 2D landmarks on projected image

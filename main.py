@@ -5,12 +5,58 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import pyvista as pv
+import tkinter as tk
+from tkinter import filedialog
 
-from config import DEFAULT_FACE_CONTOUR_LANDMARKS, DEFAULT_VISUALIZATION_SETTINGS, DEFAULT_PRINTING_SETTINGS
+from config import DEFAULT_FACE_CONTOUR_LANDMARKS, DEFAULT_VISUALIZATION_SETTINGS, DEFAULT_PRINTING_SETTINGS, DEFAULT_FILE_SETTINGS
 from core_processing import extract_face_landmarks
 from visualization import (visualize_2d_landmarks, visualize_3d_landmarks, 
-                          visualize_mesh_with_landmarks, visualize_mesh_with_yellow_lines)
+                          visualize_mesh_with_landmarks, visualize_contact_line)
 from utils import create_3d_printable_extrusion
+
+def select_mesh_file(default_folder=None):
+    """
+    Open a file dialog to select a mesh file
+    
+    Parameters:
+    -----------
+    default_folder : str, optional
+        Default folder path to open the dialog in
+    
+    Returns:
+    --------
+    str or None
+        Selected file path or None if canceled
+    """
+    try:
+        # Create a hidden root window
+        root = tk.Tk()
+        root.withdraw()
+        
+        # Set default file types for 3D meshes
+        filetypes = [
+            ("3D Mesh Files", "*.obj *.ply *.stl"),
+            ("OBJ Files", "*.obj"),
+            ("PLY Files", "*.ply"),
+            ("STL Files", "*.stl"),
+            ("All Files", "*.*")
+        ]
+        
+        # Open file dialog
+        file_path = filedialog.askopenfilename(
+            title="Select 3D Mesh File",
+            initialdir=default_folder,
+            filetypes=filetypes
+        )
+        
+        # Close the hidden root window
+        root.destroy()
+        
+        return file_path if file_path else None
+    
+    except ImportError:
+        print("Tkinter not available. Please provide the file path manually.")
+        return input("Enter the path to the 3D mesh file: ")
 
 def process_face(mesh_path, 
                 show_landmarks_2d=False, 
@@ -80,7 +126,7 @@ def process_face(mesh_path,
     if pv_plotter is not None:
         pv_plotter.subplot(0, current_subplot)
         pv_plotter.add_title("Face Mesh with Projected Path")
-        visualize_mesh_with_yellow_lines(mesh, projected_line_points, pv_plotter)
+        visualize_contact_line(mesh, projected_line_points, pv_plotter)
         
         # Enable trackball style for all subplots and link them
         pv_plotter.enable_trackball_style()
@@ -90,7 +136,7 @@ def process_face(mesh_path,
         # Standalone final plotter
         final_plotter = pv.Plotter()
         final_plotter.add_title("Face Mesh with Projected Path")
-        visualize_mesh_with_yellow_lines(mesh, projected_line_points, final_plotter)
+        visualize_contact_line(mesh, projected_line_points, final_plotter)
         final_plotter.show_grid()
         final_plotter.enable_trackball_style()  # Enable trackball style
         final_plotter.show()
@@ -119,17 +165,22 @@ if __name__ == "__main__":
     # Use default settings from config
     vis_settings = DEFAULT_VISUALIZATION_SETTINGS
     print_settings = DEFAULT_PRINTING_SETTINGS
+    file_settings = DEFAULT_FILE_SETTINGS
     
     # Face contour landmarks (uncomment and modify to use custom landmarks)
     # CONTOUR_LANDMARKS = [168, 417, 465, 429, 423, 391, 393, 164, 167, 165, 203, 209, 245, 193, 168]
     
-    # Process the face model
-    mesh_path = "D:/OneDrive/Desktop/masque/face_lionel_long_capture.obj"
-    process_face(mesh_path, 
-                 show_landmarks_2d=vis_settings['SHOW_LANDMARKS_2D'],
-                 show_landmarks_3d=vis_settings['SHOW_LANDMARKS_3D'],
-                 show_mesh_and_landmarks=vis_settings['SHOW_MESH_AND_LANDMARKS'],
-                 create_3d_print=print_settings['CREATE_3D_PRINT'],
-                 extrusion_radius=print_settings['EXTRUSION_RADIUS'],
-                 # contour_landmark_ids=CONTOUR_LANDMARKS  # Uncomment to use custom landmarks
-                )
+    # Let user select mesh file
+    mesh_path = select_mesh_file(file_settings['DEFAULT_MESH_FOLDER'])
+    
+    if mesh_path:
+        process_face(mesh_path, 
+                    show_landmarks_2d=vis_settings['SHOW_LANDMARKS_2D'],
+                    show_landmarks_3d=vis_settings['SHOW_LANDMARKS_3D'],
+                    show_mesh_and_landmarks=vis_settings['SHOW_MESH_AND_LANDMARKS'],
+                    create_3d_print=print_settings['CREATE_3D_PRINT'],
+                    extrusion_radius=print_settings['EXTRUSION_RADIUS'],
+                    # contour_landmark_ids=CONTOUR_LANDMARKS  # Uncomment to use custom landmarks
+                    )
+    else:
+        print("No mesh file selected. Exiting.")
