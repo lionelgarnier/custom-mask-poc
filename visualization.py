@@ -99,35 +99,6 @@ def visualize_mesh_with_landmarks(mesh, landmarks, landmark_indices=None, plotte
     else:
         return projected_line_points
 
-def visualize_mesh_with_yellow_lines(mesh, line_points, plotter=None):
-    """Visualize 3D mesh with yellow lines"""
-    if plotter is None:
-        plotter = pv.Plotter()
-        return_plotter = True
-    else:
-        return_plotter = False
-    
-    pv_mesh = create_pyvista_mesh(mesh)
-    
-    # Add mesh with RGB colors if available, otherwise white
-    if mesh.has_vertex_colors():
-        plotter.add_mesh(pv_mesh, scalars="RGB", rgb=True, opacity=1.0)
-    else:
-        plotter.add_mesh(pv_mesh, color='white', opacity=1.0)
-
-    # Add the yellow lines
-    proj_line = pv.lines_from_points(np.array(line_points), close=True)
-    plotter.add_mesh(proj_line, color='yellow', line_width=4)
-    
-    # Set to front view
-    set_front_view(plotter)
-    
-    if return_plotter:
-        plotter.show_grid()
-        return plotter
-    else:
-        return None
-
 def visualize_contact_line(mesh, line_points, plotter=None):
     """Visualize 3D mesh with contact line"""
     if plotter is None:
@@ -151,8 +122,8 @@ def visualize_contact_line(mesh, line_points, plotter=None):
     # Set to front view
     set_front_view(plotter)
     
-    # Instead of trackball style, use joystick camera style for easier rotation
-    plotter.iren.interactor.SetInteractorStyle(vtk.vtkInteractorStyleJoystickCamera())
+    # Enable trackball actor style for better navigation
+    plotter.enable_trackball_actor_style()
     
     if return_plotter:
         plotter.show_grid()

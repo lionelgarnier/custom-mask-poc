@@ -5,7 +5,10 @@ import numpy as np
 import open3d as o3d
 import pyvista as pv
 from scipy.interpolate import splprep, splev
+from shapely.geometry import LineString
+from shapely.ops import unary_union
 import os
+from models.base_model import Face3DObjectModel
 
 def smooth_line_points(points, smoothing=0.1, num_samples=300):
     """Smooth 3D points using spline interpolation"""
@@ -31,25 +34,22 @@ def create_pyvista_mesh(mesh):
         
     return pv_mesh
 
-def create_3d_printable_extrusion(line_points, radius=0.1, resolution=30, output_path="extruded_line.stl"):
-    """
-    Create a 3D printable object by extruding the line with a circular profile
-    """
-    # Ensure points are in numpy array format
-    line_points = np.array(line_points)
-    
-    # Create a tube (cylinder) along the line path
-    tube = pv.Spline(line_points).tube(radius=radius, n_sides=resolution)
-    
-    # Close the loop if needed
-    if np.allclose(line_points[0], line_points[-1], atol=1e-4):
-        print("Closed loop detected, ensuring watertight model")
-    
-    # Save the tube as STL
-    tube.save(output_path)
-    print(f"3D printable object saved to: {os.path.abspath(output_path)}")
-    
-    return tube
+# def create_3d_printable_shape(
+#     line_points_3d, 
+#     model: Face3DObjectModel,
+#     thickness=3.0,   # total wall thickness in millimeters
+#     height=10.0,     # extrusion height in millimeters
+#     output_path="tube.stl"
+# ):
+#     """
+#     1. Project a 3D closed line onto XY plane.
+#     2. Create outer buffer (+thickness/2) => outer polygon.
+#     3. Create inner buffer (-thickness/2) => inner polygon (the "hole").
+#     4. Extrude each polygon with PyVista => 3D solids.
+#     5. Boolean difference => hollow 'tube' with correct hole.
+#     6. Save final shape to STL.
+#     """
+#     model.create_3d_object(line_points_3d, output_path, thickness=thickness, height=height)
 
 def set_front_view(plotter):
     """Set camera to front view with head upright"""
