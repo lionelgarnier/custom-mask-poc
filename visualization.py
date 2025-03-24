@@ -8,6 +8,7 @@ import pyvista as pv
 import vtk
 from utils import create_pyvista_mesh, smooth_line_points, set_front_view
 from config import DEFAULT_FACE_CONTOUR_LANDMARKS
+from face import extract_face_landmarks
 
 def visualize_2d_landmarks(image, title="Landmarks 2D"):
     """Visualize 2D landmarks on image"""

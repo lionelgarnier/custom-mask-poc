@@ -2,13 +2,9 @@
 Utility functions for 3D face processing
 """
 import numpy as np
-import open3d as o3d
+import trimesh
 import pyvista as pv
 from scipy.interpolate import splprep, splev
-from shapely.geometry import LineString
-from shapely.ops import unary_union
-import os
-from models.base_model import Face3DObjectModel
 
 def smooth_line_points(points, smoothing=0.1, num_samples=300):
     """Smooth 3D points using spline interpolation"""
@@ -33,23 +29,6 @@ def create_pyvista_mesh(mesh):
         pv_mesh.point_data["RGB"] = colors
         
     return pv_mesh
-
-# def create_3d_printable_shape(
-#     line_points_3d, 
-#     model: Face3DObjectModel,
-#     thickness=3.0,   # total wall thickness in millimeters
-#     height=10.0,     # extrusion height in millimeters
-#     output_path="tube.stl"
-# ):
-#     """
-#     1. Project a 3D closed line onto XY plane.
-#     2. Create outer buffer (+thickness/2) => outer polygon.
-#     3. Create inner buffer (-thickness/2) => inner polygon (the "hole").
-#     4. Extrude each polygon with PyVista => 3D solids.
-#     5. Boolean difference => hollow 'tube' with correct hole.
-#     6. Save final shape to STL.
-#     """
-#     model.create_3d_object(line_points_3d, output_path, thickness=thickness, height=height)
 
 def set_front_view(plotter):
     """Set camera to front view with head upright"""

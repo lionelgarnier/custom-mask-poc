@@ -2,6 +2,7 @@
 Main entry point for face landmark detection and contour generation
 """
 import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import pyvista as pv
@@ -10,10 +11,9 @@ from tkinter import filedialog
 import importlib
 
 from config import DEFAULT_FACE_CONTOUR_LANDMARKS, DEFAULT_VISUALIZATION_SETTINGS, DEFAULT_PRINTING_SETTINGS, DEFAULT_FILE_SETTINGS, DEFAULT_MODEL, OUTPUT_FOLDER
-from core_processing import extract_face_landmarks
+from face import extract_face_landmarks
 from visualization import (visualize_2d_landmarks, visualize_3d_landmarks, 
                           visualize_mesh_with_landmarks, visualize_contact_line)
-# from utils import create_3d_printable_shape
 
 def select_mesh_file(default_folder=None):
     """
@@ -66,7 +66,7 @@ def load_model(model_name):
     model_class = getattr(module, class_name)
     return model_class()
 
-def process_face(mesh_path, model, show_landmarks_2d=False, show_landmarks_3d=False, show_mesh_and_landmarks=False, show_contact_line=False, show_3d_print=False, create_3d_print=True, extrusion_width=3.0, contour_landmark_ids=None):
+def process_face(mesh_path, model, show_landmarks_2d=False, show_landmarks_3d=False, show_mesh_and_landmarks=False, show_contact_line=False, show_3d_print=False, create_3d_print=True, extrusion_width=1.0, contour_landmark_ids=None):
     """
     Main function to process a face model and extract landmarks
     
@@ -159,7 +159,12 @@ def process_face(mesh_path, model, show_landmarks_2d=False, show_landmarks_3d=Fa
         output_path = os.path.join(OUTPUT_FOLDER, f"extruded_{base_name}.stl")
         
         # Create and save the 3D printable extrusion
-        extruded = model.create_3d_object(projected_line_points, output_path, thickness=extrusion_width)
+        extruded = model.create_3d_object(
+            output_path=output_path, 
+            line_points_3d=projected_line_points,
+            thickness=extrusion_width,
+            face_mesh=mesh
+        )
 
         # Visualize the 3D print if requested
         if show_3d_print:
@@ -191,8 +196,12 @@ if __name__ == "__main__":
     # Face contour landmarks (uncomment and modify to use custom landmarks)
     # CONTOUR_LANDMARKS = [168, 417, 465, 429, 423, 391, 393, 164, 167, 165, 203, 209, 245, 193, 168]
     
-    # Let user select mesh file
-    mesh_path = select_mesh_file(file_settings['DEFAULT_MESH_FOLDER'])
+    # Check if mesh file path is provided as a command-line argument
+    if len(sys.argv) > 1:
+        mesh_path = sys.argv[1]
+    else:
+        # Let user select mesh file
+        mesh_path = select_mesh_file(file_settings['DEFAULT_MESH_FOLDER'])
     
     if mesh_path:
         model = load_model(DEFAULT_MODEL)
