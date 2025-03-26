@@ -3,6 +3,7 @@ Main entry point for face landmark detection and contour generation
 """
 import os
 import sys
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import pyvista as pv
@@ -66,7 +67,7 @@ def load_model(model_name):
     model_class = getattr(module, class_name)
     return model_class()
 
-def process_face(mesh_path, model, show_landmarks_2d=False, show_landmarks_3d=False, show_mesh_and_landmarks=False, show_contact_line=False, show_3d_print=False, create_3d_print=True, extrusion_width=1.0, contour_landmark_ids=None):
+def process_face(mesh_path, model_name, show_3d_print=False, create_3d_print=True, extrusion_width=1.0, save_3d_print=True):
     """
     Main function to process a face model and extract landmarks
     
@@ -74,81 +75,18 @@ def process_face(mesh_path, model, show_landmarks_2d=False, show_landmarks_3d=Fa
     -----------
     mesh_path : str
         Path to the 3D mesh file
-    model : object
+    model_name : str
         Model object to create 3D printable object
-    show_landmarks_2d : bool
-        Whether to show 2D landmarks visualization
-    show_landmarks_3d : bool
-        Whether to show 3D landmarks visualization
-    show_mesh_and_landmarks : bool
-        Whether to show the mesh with landmarks
-    show_contact_line : bool
-        Whether to show the contact line visualization
     show_3d_print : bool
         Whether to show the 3D print visualization
     create_3d_print : bool
         Whether to create a 3D printable STL file
     extrusion_width : float
         Width of the extruded tube for 3D printing
-    contour_landmark_ids : list, optional
-        List of landmark IDs to use for the face contour. If None, uses default landmarks.
     """
     # Process the face to extract landmarks and contour
-    mesh, valid_points_3d, valid_indices, projected_line_points, viz_image = extract_face_landmarks(
-        mesh_path, contour_landmark_ids)
+    face_mesh, face_landmarks, valid_indices = extract_face_landmarks(mesh_path)
     
-    # Visualizations (if requested)
-    # Create a multi-panel PyVista plotter if needed
-    num_pyvista_views = sum([show_mesh_and_landmarks, show_contact_line, show_3d_print])  # Count PlotterIDs (+1 for final view)
-    if num_pyvista_views > 1:
-        pv_plotter = pv.Plotter(shape=(1, num_pyvista_views))
-        current_subplot = 0
-    else:
-        pv_plotter = None
-
-    # Store visualization figures for later display
-    figures = []
-    if show_landmarks_2d:
-        figures.append(visualize_2d_landmarks(viz_image, "MediaPipe Face Landmarks"))
-
-    if show_landmarks_3d:
-        figures.append(visualize_3d_landmarks(valid_points_3d, "3D Landmarks (Optimal Approach)"))
-
-    # Create PyVista visualizations
-    if show_mesh_and_landmarks:
-        if pv_plotter is not None:
-            pv_plotter.subplot(0, 0)
-            pv_plotter.add_title("Face Mesh with Landmarks")
-            visualize_mesh_with_landmarks(mesh, valid_points_3d, valid_indices, pv_plotter, contour_landmark_ids)
-            current_subplot += 1
-        else:
-            # Standalone plotter if only showing this view
-            landmarks_plotter = pv.Plotter()
-            landmarks_plotter.add_title("Face Mesh with Landmarks")
-            visualize_mesh_with_landmarks(mesh, valid_points_3d, valid_indices, landmarks_plotter, contour_landmark_ids)
-            landmarks_plotter.show_grid()
-            landmarks_plotter.show()
-
-    # Final visualization - only if requested
-    if show_contact_line:
-        if pv_plotter is not None:
-            pv_plotter.subplot(0, current_subplot)
-            pv_plotter.add_title("Face Mesh with Projected Path")
-            visualize_contact_line(mesh, projected_line_points, pv_plotter)
-            
-            # Enable trackball style for all subplots and link them
-            pv_plotter.enable_trackball_style()
-            pv_plotter.link_views()  # Link camera movement between subplots
-            pv_plotter.show()
-        else:
-            # Standalone final plotter
-            final_plotter = pv.Plotter()
-            final_plotter.add_title("Face Mesh with Projected Path")
-            visualize_contact_line(mesh, projected_line_points, final_plotter)
-            final_plotter.show_grid()
-            final_plotter.enable_trackball_style()  # Enable trackball style
-            final_plotter.show()
-
     # Create 3D printable object if requested
     if create_3d_print:
         # Ensure the output folder exists
@@ -156,65 +94,54 @@ def process_face(mesh_path, model, show_landmarks_2d=False, show_landmarks_3d=Fa
         
         # Get the base filename without extension
         base_name = os.path.splitext(os.path.basename(mesh_path))[0]
-        output_path = os.path.join(OUTPUT_FOLDER, f"extruded_{base_name}.stl")
-        
+        output_path = os.path.join(OUTPUT_FOLDER, f"3d_print_{base_name}.stl")
+
+        model = load_model(model_name)
+
         # Create and save the 3D printable extrusion
-        extruded = model.create_3d_object(
+        model_3d_object = model.create_3d_object(
             output_path=output_path, 
-            line_points_3d=projected_line_points,
             thickness=extrusion_width,
-            face_mesh=mesh
+            face_mesh=face_mesh,
+            face_landmarks=face_landmarks,
+            face_landmarks_ids=valid_indices
         )
 
         # Visualize the 3D print if requested
         if show_3d_print:
-            if pv_plotter is not None:
-                pv_plotter.subplot(0, current_subplot)
-                pv_plotter.add_title("3D Printable Object")
-                pv_plotter.add_mesh(extruded, color='white')
-                pv_plotter.show()
-            else:
-                # Standalone plotter for 3D print visualization
-                print_plotter = pv.Plotter()
-                print_plotter.add_title("3D Printable Object")
-                print_plotter.add_mesh(extruded, color='white')
-                print_plotter.show_grid()
-                print_plotter.show()
+            print_plotter = pv.Plotter()
+            print_plotter.add_title("3D Printable Object")
+            print_plotter.add_mesh(model_3d_object, color='white')
+            print_plotter.show_grid()
+            print_plotter.show()
 
-    # Display all matplotlib figures (if any)
-    if len(figures) > 0:
-        plt.show()
-    
-    return valid_points_3d, projected_line_points
+        if save_3d_print:
+            model_3d_object.save(output_path)
+
+
+    return valid_points_3d
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Face landmark detection and contour generation")
+    parser.add_argument("-p", "--path", type=str, help="Path to the 3D mesh file")
+    parser.add_argument("-m", "--model", type=str, default=DEFAULT_MODEL, help="Model name to use for 3D object creation")
+    args = parser.parse_args()
+
     # Use default settings from config
     vis_settings = DEFAULT_VISUALIZATION_SETTINGS
     print_settings = DEFAULT_PRINTING_SETTINGS
     file_settings = DEFAULT_FILE_SETTINGS
     
-    # Face contour landmarks (uncomment and modify to use custom landmarks)
-    # CONTOUR_LANDMARKS = [168, 417, 465, 429, 423, 391, 393, 164, 167, 165, 203, 209, 245, 193, 168]
-    
     # Check if mesh file path is provided as a command-line argument
-    if len(sys.argv) > 1:
-        mesh_path = sys.argv[1]
-    else:
-        # Let user select mesh file
-        mesh_path = select_mesh_file(file_settings['DEFAULT_MESH_FOLDER'])
+    mesh_path = args.path if args.path else select_mesh_file(file_settings['DEFAULT_MESH_FOLDER'])
     
     if mesh_path:
-        model = load_model(DEFAULT_MODEL)
         process_face(mesh_path, 
-                    model,
-                    show_landmarks_2d=vis_settings['SHOW_LANDMARKS_2D'],
-                    show_landmarks_3d=vis_settings['SHOW_LANDMARKS_3D'],
-                    show_mesh_and_landmarks=vis_settings['SHOW_MESH_AND_LANDMARKS'],
-                    show_contact_line=vis_settings['SHOW_CONTACT_LINE'],
+                    args.model,
                     show_3d_print=vis_settings['SHOW_3D_PRINT'],
                     create_3d_print=print_settings['CREATE_3D_PRINT'],
-                    extrusion_width=print_settings['EXTRUSION_WIDTH'],
-                    # contour_landmark_ids=CONTOUR_LANDMARKS  # Uncomment to use custom landmarks
+                    save_3d_print=print_settings['SAVE_3D_PRINT']   
                     )
     else:
         print("No mesh file selected. Exiting.")

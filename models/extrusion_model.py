@@ -22,5 +22,4 @@ class ExtrusionModel(Face3DObjectModel):
         polygon_3d = polyline.ribbon(width=thickness, normal=[0, 0, 1]).triangulate()
         extruded = polygon_3d.extrude((0, 0, height + height_diff), capping=True).triangulate()
 
-        extruded.save(output_path)
         return extruded

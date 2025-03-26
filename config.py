@@ -3,8 +3,8 @@ Configuration settings for face landmark detection and processing
 """
 
 # Default landmarks for face contour
-# DEFAULT_FACE_CONTOUR_LANDMARKS = [168, 417, 465, 429, 423, 391, 393, 164, 167, 165, 203, 209, 245, 193, 168]
-DEFAULT_FACE_CONTOUR_LANDMARKS = [168, 464, 423, 391, 393, 164, 167, 165, 203, 193, 168]
+# DEFAULT_FACE_CONTOUR_LANDMARKS = [168, 464, 423, 391, 393, 164, 167, 165, 203, 193, 168] #Nose large
+DEFAULT_FACE_CONTOUR_LANDMARKS = [168, 465, 419, 363, 134, 196, 245, 168] # Simplified version
 
 # File system settings
 DEFAULT_FILE_SETTINGS = {
@@ -28,6 +28,7 @@ DEFAULT_PRINTING_SETTINGS = {
     'CREATE_3D_PRINT': True,  # Create a 3D printable STL file
     'EXTRUSION_WIDTH': 2,  # Width of the extruded tube (thickness of the walls in mm)
     'EXTRUSION_RESOLUTION': 30,  # Resolution of the circular cross-section
+    'SAVE_3D_PRINT': True  # Save the 3D printable STL file
 }
 
 # Default 3D model for creating printable objects

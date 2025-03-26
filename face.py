@@ -5,37 +5,28 @@ import mediapipe as mp
 import open3d as o3d
 import numpy as np
 import cv2
-from utils import create_pyvista_mesh, smooth_line_points
+from utils import create_pyvista_mesh, smooth_line_points, compute_rotation_between_vectors
 from config import DEFAULT_FACE_CONTOUR_LANDMARKS
-import scipy.spatial.transform
 
-def extract_face_landmarks(mesh_path, contour_landmark_ids=None):
+
+def extract_face_landmarks(mesh_path):
     """
     Core processing function to extract 3D landmarks and face contour.
     1. Loads the 3D face mesh.
     2. Aligns the mesh to a front view.
     3. Extracts landmarks from the aligned mesh.
-    4. Projects a contour line onto the mesh.
 
     Parameters:
     -----------
     mesh_path : str
         Path to the 3D mesh file
-    contour_landmark_ids : list, optional
-        List of landmark IDs to use for the face contour. If None, uses default landmarks.
-        
+     
     Returns:
     --------
-    mesh : o3d.geometry.TriangleMesh
-        The aligned 3D mesh
     valid_points_3d : np.ndarray
         Extracted 3D landmarks
     valid_indices : np.ndarray
         Indices of the valid landmarks
-    projected_line_points : np.ndarray
-        The projected face contour line onto the mesh
-    viz_image : np.ndarray
-        Visualization image with 2D landmarks
     """
     # Load 3D model and compute normals
     mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -46,25 +37,9 @@ def extract_face_landmarks(mesh_path, contour_landmark_ids=None):
 
     # Extract landmarks from the aligned mesh
     width, height = 800, 800
-    landmarks_2d, landmarks_3d, valid_indices, _, color_image = extract_landmarks_from_mesh(aligned_mesh, width, height)
+    landmarks_3d, valid_indices = extract_landmarks_from_front_view(aligned_mesh, width, height)
 
-    # Generate face contour
-    if contour_landmark_ids is None:
-        contour_landmark_ids = DEFAULT_FACE_CONTOUR_LANDMARKS
-    projected_line_points = extract_face_contour(
-        aligned_mesh, 
-        landmarks_3d, 
-        valid_indices, 
-        contour_landmark_ids
-    )
-
-    # Create visualization image with landmarks
-    viz_image = color_image.copy()
-    for x, y in landmarks_2d:
-        if 0 <= x < width and 0 <= y < height:
-            cv2.circle(viz_image, (int(x), int(y)), 1, (0, 255, 0), -1)
-
-    return aligned_mesh, landmarks_3d, valid_indices, projected_line_points, viz_image
+    return aligned_mesh, landmarks_3d, valid_indices
 
 def align_face_mesh_3d(mesh):
     """
@@ -86,7 +61,7 @@ def align_face_mesh_3d(mesh):
 
     # Extract initial landmarks
     try:
-        landmarks_2d, landmarks_3d, valid_indices, _, _ = extract_landmarks_from_mesh(mesh, width, height)
+        landmarks_3d, valid_indices = extract_landmarks_from_front_view(mesh, width, height)
         # Identify key nose landmarks
         nose_top_idx = np.where(valid_indices == 168)[0][0]
         nose_bottom_idx = np.where(valid_indices == 200)[0][0]
@@ -105,7 +80,7 @@ def align_face_mesh_3d(mesh):
 
         # Stage 2: Eye balance
         # Re-extract landmarks after the first rotation
-        landmarks_2d_2, landmarks_3d_2, valid_indices_2, _, _ = extract_landmarks_from_mesh(mesh_aligned_stage1, width, height)
+        landmarks_3d_2, valid_indices_2 = extract_landmarks_from_front_view(mesh_aligned_stage1, width, height)
         left_eye_idx = np.where(valid_indices_2 == 33)[0][0]
         right_eye_idx = np.where(valid_indices_2 == 263)[0][0]
 
@@ -127,36 +102,7 @@ def align_face_mesh_3d(mesh):
         print(f"Alignment failed: {e}")
         return mesh
 
-def compute_rotation_between_vectors(source_vector, target_vector):
-    """
-    Compute the rotation matrix that aligns source_vector with target_vector.
-    """
-    source = source_vector / np.linalg.norm(source_vector) if np.linalg.norm(source_vector) > 0 else source_vector
-    target = target_vector / np.linalg.norm(target_vector) if np.linalg.norm(target_vector) > 0 else target_vector
-    
-    # If vectors are nearly identical, return identity
-    if np.allclose(source, target, atol=1e-6):
-        return np.eye(3)
-
-    # If vectors are nearly opposite, we need 180-degree rotation around any perpendicular axis
-    if np.allclose(source, -target, atol=1e-6):
-        if abs(source[0]) < abs(source[1]):
-            perp = np.array([0, source[2], -source[1]])
-        else:
-            perp = np.array([source[2], 0, -source[0]])
-        perp = perp / np.linalg.norm(perp)
-        rotation = scipy.spatial.transform.Rotation.from_rotvec(np.pi * perp)
-        return rotation.as_matrix()
-    
-    # In the general case, compute the rotation matrix directly
-    rotation_axis = np.cross(source, target)
-    rotation_axis /= np.linalg.norm(rotation_axis)
-    cos_angle = np.dot(source, target)
-    angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
-    rotation = scipy.spatial.transform.Rotation.from_rotvec(angle * rotation_axis)
-    return rotation.as_matrix()
-
-def extract_landmarks_from_mesh(mesh, width=800, height=800):
+def extract_landmarks_from_front_view(mesh, width=800, height=800):
     """
     Extract 2D and 3D landmarks from a mesh using MediaPipe.
     
@@ -237,15 +183,13 @@ def extract_landmarks_from_mesh(mesh, width=800, height=800):
     valid_points_3d = points_3d[valid_mask]
     valid_indices = np.where(valid_mask)[0]
     
-    return points_2d, valid_points_3d, valid_indices, depth, image_color_cv
+    return valid_points_3d, valid_indices
 
-def extract_face_contour(mesh, landmarks, landmark_indices, contour_landmark_ids=None):
+def extract_line_from_landmarks(mesh, landmarks, landmark_indices, contour_landmark_ids=DEFAULT_FACE_CONTOUR_LANDMARKS):
     """
     Extract face contour line from landmarks and project it onto the face mesh.
     """
     pv_mesh = create_pyvista_mesh(mesh)
-    if contour_landmark_ids is None:
-        contour_landmark_ids = DEFAULT_FACE_CONTOUR_LANDMARKS
     
     valid_ids = [np.where(landmark_indices == lid)[0][0] 
                  for lid in contour_landmark_ids if lid in landmark_indices]
