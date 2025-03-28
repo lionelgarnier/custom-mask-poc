@@ -2,12 +2,19 @@
 Utility functions for 3D face processing
 """
 import numpy as np
-import trimesh
 import pyvista as pv
 import open3d as o3d
 from pyvista import PolyData
 from scipy.interpolate import splprep, splev
 import scipy.spatial.transform
+# from scipy.spatial import Delaunay
+import meshlib.mrmeshpy as mr
+import triangle
+import tempfile
+import os
+import trimesh
+from functools import singledispatch
+from scipy.spatial import Delaunay
 
 def smooth_line_points(points, smoothing=0.1, num_samples=300):
     """Smooth 3D points using spline interpolation"""
@@ -17,22 +24,6 @@ def smooth_line_points(points, smoothing=0.1, num_samples=300):
     x_new, y_new, z_new = splev(u_new, tck)
     return np.column_stack((x_new, y_new, z_new))
 
-def create_pyvista_mesh(mesh):
-    """Convert Open3D mesh to PyVista mesh"""
-    mesh_vertices = np.asarray(mesh.vertices)
-    mesh_faces = np.asarray(mesh.triangles)
-    faces_pyvista = np.hstack((np.full((len(mesh_faces), 1), 3), mesh_faces)).astype(np.int64)
-    pv_mesh = pv.PolyData(mesh_vertices, faces_pyvista)
-    
-    # Transfer vertex colors if available
-    if mesh.has_vertex_colors():
-        colors = np.asarray(mesh.vertex_colors)
-        # Convert RGB colors from [0,1] to [0,255] for PyVista
-        colors = (colors * 255).astype(np.uint8)
-        pv_mesh.point_data["RGB"] = colors
-        
-    return pv_mesh
-
 def set_front_view(plotter):
     """Set camera to front view with head upright"""
     plotter.view_xy()  # Set to front view (looking at XY plane)
@@ -41,160 +32,295 @@ def set_front_view(plotter):
     plotter.enable_trackball_style()
     return plotter
 
-def extrude_mesh_with_normals(surface, thickness):
+def convert_o3d_to_pv(o3d_mesh):
+    """Convert Open3D mesh to PyVista mesh"""
+    mesh_vertices = np.asarray(o3d_mesh.vertices)
+    mesh_faces = np.asarray(o3d_mesh.triangles)
+    faces_pyvista = np.hstack((np.full((len(mesh_faces), 1), 3), mesh_faces)).astype(np.int64)
+    pv_mesh = pv.PolyData(mesh_vertices, faces_pyvista)
+    
+    # Transfer vertex colors if available
+    if o3d_mesh.has_vertex_colors():
+        colors = np.asarray(o3d_mesh.vertex_colors)
+        # Convert RGB colors from [0,1] to [0,255] for PyVista
+        colors = (colors * 255).astype(np.uint8)
+        pv_mesh.point_data["RGB"] = colors
+        
+    return pv_mesh
+
+def convert_pv_to_mr(pv_mesh: pv.PolyData) -> mr.Mesh:
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = os.path.join(temp_dir, "input_mesh.stl")
+
+        # Save the surface as an STL file
+        pv_mesh.save(input_path)
+        mr_mesh = mr.loadMesh(input_path)
+    
+        pv_center = pv_mesh.center
+        mr_center_3f = centroid_mr(mr_mesh)
+        mr_center = np.array([mr_center_3f.x, mr_center_3f.y, mr_center_3f.z])
+        translation_vector = mr_center - pv_center 
+        mr_mesh = translate_mesh_mr(mr_mesh, translation_vector)
+
+    return mr_mesh
+
+def convert_mr_to_pv(mr_mesh: mr.Mesh) -> pv.PolyData:
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+
+        input_path = os.path.join(temp_dir, "input_mesh.stl")
+        mr.saveMesh(mr_mesh, input_path)
+        pv_mesh = pv.read(input_path)
+        
+        pv_center = pv_mesh.center
+        mr_center_3f = centroid_mr(mr_mesh)
+        mr_center = np.array([mr_center_3f.x, mr_center_3f.y, mr_center_3f.z])
+        translation_vector = pv_center - mr_center  
+        pv_mesh = pv_mesh.translate(translation_vector, inplace=True)
+
+    return pv_mesh
+
+
+def extrude_mesh(surface, thickness = None, vector = None):
+    
+    if isinstance(surface, mr.Mesh):
+        type = "mr"
+        surface = convert_mr_to_pv(surface)
+    else:
+        type = "pv"
+    
+    if vector is None:
+        vector = compute_normals(surface)
+
+    if thickness is None:
+        thickness = 5.0
+
+    vector = vector * thickness
+
+    extruded = surface.extrude(vector, capping=True).triangulate()
+    extruded_closed = extruded.fill_holes(1e5)
+
+    # Convert back to MRMeshPy if needed
+    if type == "mr":
+        extruded_closed = convert_pv_to_mr(extruded_closed)
+
+    return extruded_closed
+
+@singledispatch
+def compute_normals(mesh) -> np.ndarray:
+    raise TypeError("Unsupported mesh type.")
+
+@compute_normals.register
+def _(mesh: pv.PolyData) -> np.ndarray:
+    # Compute the average surface normal
+    simplified_mesh = mesh.decimate(target_reduction=0.9)  # Retain 10% of the faces
+
+    num_faces = simplified_mesh.n_faces
+    normals = []
+    for i in range(num_faces):
+        face = simplified_mesh.extract_feature_edges(i)
+        face_points = face.points
+        v0 = face_points[0]
+        v1 = face_points[1]
+        v2 = face_points[2]
+        
+        # Compute face normal
+        normal = np.cross(v1 - v0, v2 - v0)
+        norm = np.linalg.norm(normal)
+        if norm > 0:
+            normal /= norm
+        normals.append(normal)
+    
+    # Calculate average normal
+    avg_normal = np.mean(normals, axis=0)
+    avg_normal /= np.linalg.norm(avg_normal)  # Normalize the vector
+
+    return avg_normal
+
+@compute_normals.register
+def _(mesh: mr.Mesh) -> np.ndarray:
+    # Compute the average surface normal
+    num_faces = mesh.topology.numValidFaces()
+    normals = []
+    for i in range(num_faces):
+        face_id = mr.FaceId(i)
+        if not mesh.topology.hasFace(face_id):
+            continue
+        
+        # Get vertex indices as integers
+        vert_ids = mesh.topology.getTriVerts(face_id)
+        # Convert VertId objects to integers for indexing
+        v0_idx = vert_ids[0].get()
+        v1_idx = vert_ids[1].get()
+        v2_idx = vert_ids[2].get()
+        
+        # Get vertex coordinates
+        v0 = np.array([mesh.points.vec[v0_idx].x, mesh.points.vec[v0_idx].y, mesh.points.vec[v0_idx].z])
+        v1 = np.array([mesh.points.vec[v1_idx].x, mesh.points.vec[v1_idx].y, mesh.points.vec[v1_idx].z])
+        v2 = np.array([mesh.points.vec[v2_idx].x, mesh.points.vec[v2_idx].y, mesh.points.vec[v2_idx].z])
+        
+        # Compute face normal
+        normal = np.cross(v1 - v0, v2 - v0)
+        norm = np.linalg.norm(normal)
+        if norm > 0:
+            normal /= norm
+        normals.append(normal)
+    
+    # Calculate average normal
+    avg_normal = np.mean(normals, axis=0)
+    avg_normal /= np.linalg.norm(avg_normal)  # Normalize the vector
+
+    return avg_normal
+
+def translate_mesh_mr(mesh: mr.Mesh, translation_vector) -> mr.Mesh:
     """
-    Extrude a surface mesh along its normals with a specified thickness.
+    Translate a mesh by adding the translation vector to each vertex.
     
     Parameters:
-    -----------
-    surface : pyvista.PolyData
-        The input surface mesh
-    thickness : float
-        The thickness of the extrusion
-    line_points_3d : numpy.ndarray, optional
-        Optional boundary points. If not provided, they will be extracted from the surface.
+        mesh (mr.Mesh): The mesh to translate.
+        translation_vector (tuple or list of float): (tx, ty, tz)
     
     Returns:
-    --------
-    pyvista.PolyData
-        The extruded volume
+        mr.Mesh: The translated mesh.
     """
-    # Ensure the surface is triangulated and has normals
-    if surface.n_cells == 0:
-        surface = surface.triangulate()
-    if 'Normals' not in surface.array_names:
-        surface.compute_normals(inplace=True)
+    tx, ty, tz = translation_vector
+    # Iterate over all vertices in the mesh
+    for i in range(mesh.points.size()):
+        # Get the current point (assuming mr.Vector3f supports .x, .y, .z)
+        p = mesh.points.vec[i]
+        # Create the new point
+        new_point = mr.Vector3f(p.x + tx, p.y + ty, p.z + tz)
+        # Update the vertex position
+        mesh.points.vec[i] = new_point
 
-    # Uniform extrusion for the main surface
-    offset_points = surface.points + surface.point_normals * thickness
-    num_points = surface.n_points
-    combined_points = np.vstack([surface.points, offset_points])
+    # Invalidate any cached topology/geometry if needed
+    mesh.invalidateCaches()
+    return mesh
 
-    # Duplicate faces for offset surface
-    faces = surface.faces.reshape(-1, 4)
-    offset_faces = faces.copy()
-    offset_faces[:, 1:4] += num_points
-    edges = surface.extract_feature_edges(
-        boundary_edges=True, 
-        feature_edges=False, 
-        manifold_edges=False
-    )
-    boundary_points = np.array(edges.points)
+def thicken_mesh(surface, thickness, vector = None):
+    # Create temporary directory for mesh files
+    if isinstance(surface, pv.PolyData):
+        type = "pv"
+        surface = convert_pv_to_mr(surface)
+    else:
+        type = "mr"      
 
-    # Generate boundary side faces
-    boundary_normals = np.zeros_like(boundary_points)
-    for i, point in enumerate(boundary_points):
-        dists = np.sum((surface.points - point)**2, axis=1)
-        closest_idx = np.argmin(dists)
-        boundary_normals[i] = surface.point_normals[closest_idx]
+    if vector is None:
+        vector = compute_normals(surface)
+
+    # Setup parameters for thickening in both directions
+    params = mr.GeneralOffsetParameters()
+    params.voxelSize = mr.suggestVoxelSize(surface, 1e6) 
+    params.signDetectionMode = mr.SignDetectionMode.HoleWindingRule
+    params.mode = mr.GeneralOffsetParametersMode.Smooth
     
-    offset_boundary_points = boundary_points + boundary_normals * thickness
-    combined_points = np.vstack([combined_points, boundary_points, offset_boundary_points])
-
-    # Create side faces for the boundary
-    side_faces = []
-    n_boundary = len(boundary_points)
-    base_idx = num_points * 2  # boundary points start after original and offset surface points
+    # 1. Thicken in both directions
+    thickened_mesh_mr = mr.thickenMesh(surface, thickness, params)
     
-    # Create ordered pairs of boundary points for side faces
-    # This assumes the boundary points form a proper loop
-    for i in range(n_boundary):
-        j = (i + 1) % n_boundary
-        i_orig = base_idx + i
-        j_orig = base_idx + j
-        i_offset = base_idx + n_boundary + i
-        j_offset = base_idx + n_boundary + j
-        # Create a quad face: i_orig -> j_orig -> j_offset -> i_offset
-        side_faces.extend([4, i_orig, j_orig, j_offset, i_offset])
+    # 2. Thicken only in the interior direction
+    extruded_mesh_mr = extrude_mesh(surface, thickness * 10, vector)
 
-    all_faces = np.hstack([faces.flatten(), offset_faces.flatten(), np.array(side_faces, dtype=np.int32)])
-    return pv.PolyData(combined_points, all_faces)
+    # Perform boolean intersection with MRMeshPy
+    result = mr.voxelBooleanIntersect(thickened_mesh_mr, extruded_mesh_mr, params.voxelSize)
 
-def get_surface_within_area(face_mesh, line_points_3d):
-    """
-    Generate a surface by extracting the portion of the face mesh inside the polygon defined by line_points_3d.
+    # plotter = pv.Plotter()
+    # plotter.add_mesh(convert_mr_to_pv(result), color='green', opacity=0.7, show_edges=True)
+    # plotter.show()
     
-    Args:
-        face_mesh: Face mesh as PyVista PolyData, Open3D TriangleMesh, or dict with vertices and faces
-        line_points_3d: 3D points defining the boundary outline
+    # Convert back to Pyvista if needed
+    if type == "pv":
+        result = convert_mr_to_pv(result)
+
+
+    return result
         
-    Returns:
-        PyVista PolyData representing the clipped surface
-    """
-    # Create a polyline from the points
-    polyline = pv.PolyData(line_points_3d)
-    n_points = len(line_points_3d)
-    lines = np.hstack((n_points, np.arange(n_points)))
-    polyline.lines = np.array([lines])
     
-    # Extract the 2D polygon outline in the XY plane
-    polygon_points = line_points_3d[:, :2]  # Keep only X and Y coordinates
-    
-    face_mesh_pv = create_pyvista_mesh(face_mesh)
+def centroid_mr(mesh: mr.Mesh) -> mr.Vector3f:
+    # Get bitset of all valid vertices in the mesh
+    all_verts = mesh.topology.getValidVerts()
+    total = mr.Vector3f(0.0, 0.0, 0.0)    # accumulator for sum of coordinates
+    count = 0 
 
-    # Extract points and faces inside the polygon using boolean operations
-    # Create a 2D polygon and extrude it to get a selection volume
-    polygon = pv.PolyData(np.hstack([polygon_points, np.zeros((len(polygon_points), 1))]))
-    polygon.lines = polyline.lines
+    # Iterate through all vertex indices, summing their coordinates
+    for i in range(all_verts.size()):               # iterate over bitset range
+        if all_verts.test(mr.VertId(i)):            # check if vertex i is valid
+            total += mesh.points.vec[i]             # add vertex i's coordinate&#8203;:contentReference[oaicite:5]{index=5}
+            count += 1
+
+    # Compute average (centroid) if there was at least one vertex
+    if count > 0:
+        centroid = mr.Vector3f(total.x / count, total.y / count, total.z / count)
+        return centroid
+    else:
+        raise ValueError("Mesh has no vertices.")
+
+def get_surface_from_points_2d(line_points_2d) -> pv.PolyData:
+    # Perform Delaunay triangulation
+    delaunay = Delaunay(line_points_2d)
+
+    # Extract the simplices (triangles) from the triangulation
+    simplices = delaunay.simplices
+
+    # Add a Z-coordinate (0) to the 2D points to make them 3D
+    line_points_3d = np.column_stack((line_points_2d, np.zeros(line_points_2d.shape[0])))
     
-    # Create a surface from the polygon
-    surf = polygon.delaunay_2d()
-    
-    # Create a selection volume by extruding far in z-direction (both ways)
-    points = face_mesh_pv.points
-    z_min, z_max = np.min(points[:, 2]), np.max(points[:, 2])
-    z_range = z_max - z_min
-    extrusion = surf.extrude((0, 0, 2*z_range), capping=True)
-    extrusion.translate((0, 0, z_min - z_range/2), inplace=True)
-    
-    # Select the part of the face mesh inside the extrusion
-    surface = face_mesh_pv.clip_surface(extrusion)
-    
+    # Create a PyVista PolyData object from the triangulation
+    surface = pv.PolyData(line_points_3d, np.hstack((np.full((len(simplices), 1), 3), simplices)).astype(int))
+
     return surface
 
-def remove_surface_within_area(mesh, line_points_3d, height=None):
+
+def get_surface_within_area(mesh: pv.PolyData, line_points_3d) -> pv.PolyData:
+    #TODO: extrude in normal direction instead of Z
+    # vector = compute_normals(mesh)
+    try:
+        # Extract the 2D polygon outline in the XY plane
+        polygon_points = line_points_3d[:, :2]  # Keep only X and Y coordinates
+        surface = get_surface_from_points_2d(polygon_points)
+
+        # Create a selection volume by extruding far in z-direction (both ways)
+        points = mesh.points
+        z_min, z_max = np.min(points[:, 2]), np.max(points[:, 2])
+        z_range = z_max - z_min
+        extrusion = surface.extrude((0, 0, 2*z_range), capping=True)
+        extrusion.translate((0, 0, z_min - z_range/2), inplace=True)
+        
+        # Select the part of the face mesh inside the extrusion
+        surface = mesh.clip_surface(extrusion)
+
+        return surface, ""
+    
+    except Exception as e:
+        return None, f"Error in get_surface_within_area: {e}"
+
+
+def remove_surface_within_area(mesh, line_points_3d):
     """
     Remove from mesh any region enclosed by line_points_3d.
     """
-    mesh_pv = create_pyvista_mesh(mesh)
-    
-    # Create a 2D polygon from line_points_3d
-    polyline = pv.PolyData(line_points_3d)
-    n_points = len(line_points_3d)
-    lines = np.hstack((n_points, np.arange(n_points)))
-    polyline.lines = np.array([lines])
+    # vector = compute_normals(mesh)
+    vector = np.array([0, 0, 1])  # Default extrusion direction
 
-    # Calculate the average Z coordinate of the line_points_3d
-    z_avg = np.mean(line_points_3d[:, 2])
+    # Project line_points_3d onto the XY plane
+    polygon_points = line_points_3d[:, :2]  # Keep only X and Y coordinates
+        
+    surface = get_surface_from_points_2d(polygon_points)
+    extrusion = extrude_mesh(surface, 50, vector=vector)
+    mesh_center = mesh.center
+    extrusion_center = extrusion.center
+    translation_vector = np.array(mesh_center) - np.array(extrusion_center)
+    translation_vector = np.array([0, 0, translation_vector[2]])  
 
-    # Triangulate the polygon
-    polygon_2d = polyline.delaunay_2d()
+    # Move the extrusion to the center of the surface
+    extrusion = extrusion.translate(translation_vector, inplace=True)
 
-    # Extrude the 2D polygon to form a cutting volume
-    centered_points = line_points_3d - line_points_3d.mean(axis=0)
-    _, _, vh = np.linalg.svd(centered_points, full_matrices=False)
-    plane_normal = vh[-1]
-    points = mesh_pv.points
-    plane_normal /= np.linalg.norm(plane_normal)
+    clipped_mesh = mesh.clip_surface(extrusion, invert=False)
 
-    if height is None:
-        projections = np.dot(points, plane_normal)
-        proj_min, proj_max = np.min(projections), np.max(projections)
-        height = abs(proj_max - proj_min) * 2
-
-    extrusion_vector = plane_normal * height
-    polygon_2d.translate(-np.array(extrusion_vector) / 2, inplace=True)
-    extrusion = polygon_2d.extrude(extrusion_vector, capping=True)
-    
-    # Clip the mesh (invert=False to remove the inside region)
-    clipped_mesh = mesh_pv.clip_surface(extrusion, invert=False)
-
-    # Add the surface to the plotter for visualization
-    # Optionally plot for debugging
     # plotter = pv.Plotter()
-    # plotter.add_mesh(mesh_pv, color='lightgreen', opacity=0.2, show_edges=True)
+    # plotter.add_mesh(mesh, color='gray', opacity=0.2, show_edges=True)
     # plotter.add_mesh(extrusion, color='lightblue', opacity=0.5, show_edges=True)
-    # plotter.add_mesh(polygon_2d, color='red', opacity=0.2, show_edges=True)
+    # plotter.add_mesh(clipped_mesh, color='red', opacity=0.7, show_edges=True)
     # plotter.add_mesh(pv.PolyData(line_points_3d), color='yellow', point_size=10, render_points_as_spheres=True)
     # plotter.show()
 
@@ -347,4 +473,15 @@ def get_landmark(landmarks, landmark_ids=None, target_id=None):
     else:
         raise ValueError("Invalid landmarks format. Must be either an array with landmark_ids or an object with landmarks dictionary.")
 
+def clean_and_smooth(mesh, smooth_iter=50, clean_tol=1e-3):
+    # Remove small isolated components
+    # mesh = mesh.connectivity(largest=True)
+    
+    # Clean and remove degenerate features
+    mesh = mesh.clean(tolerance=clean_tol)
+    
+    # Smooth mesh (taubin smoothing retains volume better)
+    mesh = mesh.smooth_taubin(n_iter=smooth_iter, pass_band=0.1)
+
+    return mesh
 

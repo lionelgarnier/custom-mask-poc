@@ -67,7 +67,7 @@ def load_model(model_name):
     model_class = getattr(module, class_name)
     return model_class()
 
-def process_face(mesh_path, model_name, show_3d_print=False, create_3d_print=True, extrusion_width=1.0, save_3d_print=True):
+def process_face(mesh_path, model_name, show_3d_print=False, create_3d_print=True, save_3d_print=True):
     """
     Main function to process a face model and extract landmarks
     
@@ -99,16 +99,19 @@ def process_face(mesh_path, model_name, show_3d_print=False, create_3d_print=Tru
         model = load_model(model_name)
 
         # Create and save the 3D printable extrusion
-        model_3d_object = model.create_3d_object(
+        model_3d_object, error = model.create_3d_object(
             output_path=output_path, 
-            thickness=extrusion_width,
             face_mesh=face_mesh,
             face_landmarks=face_landmarks,
             face_landmarks_ids=valid_indices
         )
 
+        if error:
+            print(f"Error creating 3D printable object: {error}")
+            return False
+
         # Visualize the 3D print if requested
-        if show_3d_print:
+        if show_3d_print :
             print_plotter = pv.Plotter()
             print_plotter.add_title("3D Printable Object")
             print_plotter.add_mesh(model_3d_object, color='white')
@@ -119,7 +122,8 @@ def process_face(mesh_path, model_name, show_3d_print=False, create_3d_print=Tru
             model_3d_object.save(output_path)
 
 
-    return valid_points_3d
+
+    return True
 
 if __name__ == "__main__":
     # Parse command-line arguments

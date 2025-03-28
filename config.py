@@ -26,7 +26,7 @@ DEFAULT_VISUALIZATION_SETTINGS = {
 # 3D printing options
 DEFAULT_PRINTING_SETTINGS = {
     'CREATE_3D_PRINT': True,  # Create a 3D printable STL file
-    'EXTRUSION_WIDTH': 2,  # Width of the extruded tube (thickness of the walls in mm)
+    'EXTRUSION_WIDTH': 10,  # Width of the extruded tube (thickness of the walls in mm)
     'EXTRUSION_RESOLUTION': 30,  # Resolution of the circular cross-section
     'SAVE_3D_PRINT': True  # Save the 3D printable STL file
 }
