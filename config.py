@@ -17,8 +17,8 @@ OUTPUT_FOLDER = "output"
 # Visualization settings
 DEFAULT_VISUALIZATION_SETTINGS = {
     'SHOW_LANDMARKS_2D': False,  # Show 2D landmarks on projected image
-    'SHOW_LANDMARKS_3D': False,  # Show 3D landmarks scatter plot
-    'SHOW_MESH_AND_LANDMARKS': False,  # Show mesh with landmarks and IDs
+    'SHOW_LANDMARKS_3D': True,  # Show 3D landmarks scatter plot
+    'SHOW_MESH_AND_LANDMARKS': True,  # Show mesh with landmarks and IDs
     'SHOW_CONTACT_LINE': False,  # Show contact line visualization
     'SHOW_3D_PRINT': True  # Show 3D print visualization
 }

@@ -16,10 +16,16 @@ import trimesh
 from functools import singledispatch
 from scipy.spatial import Delaunay
 
-def smooth_line_points(points, smoothing=0.1, num_samples=300):
+from vtkmodules.vtkCommonCore import vtkPoints
+from vtkmodules.vtkCommonDataModel import vtkPolyData
+from vtkmodules.vtkFiltersModeling import vtkRuledSurfaceFilter
+import vtk
+
+
+def smooth_line_points(points, smoothing=0.1, num_samples=300, closed=True):
     """Smooth 3D points using spline interpolation"""
     x, y, z = points[:,0], points[:,1], points[:,2]
-    tck, u = splprep([x, y, z], s=smoothing, k=2, per=True)
+    tck, u = splprep([x, y, z], s=smoothing, k=2, per=closed)
     u_new = np.linspace(0, 1, num_samples)
     x_new, y_new, z_new = splev(u_new, tck)
     return np.column_stack((x_new, y_new, z_new))
@@ -28,8 +34,8 @@ def set_front_view(plotter):
     """Set camera to front view with head upright"""
     plotter.view_xy()  # Set to front view (looking at XY plane)
     plotter.camera_position = [(0, 0, 1), (0, 0, 0), (0, 1, 0)]  # Position, focus, up-vector
-    plotter.camera.zoom(0.8)  # Slight zoom for better framing
-    plotter.enable_trackball_style()
+    # plotter.camera.zoom(0.8)  # Slight zoom for better framing
+    # plotter.enable_trackball_style()
     return plotter
 
 def convert_o3d_to_pv(o3d_mesh):
@@ -57,10 +63,10 @@ def convert_pv_to_mr(pv_mesh: pv.PolyData) -> mr.Mesh:
         pv_mesh.save(input_path)
         mr_mesh = mr.loadMesh(input_path)
     
-        pv_center = pv_mesh.center
+        pv_center = centroid_pv(pv_mesh)
         mr_center_3f = centroid_mr(mr_mesh)
         mr_center = np.array([mr_center_3f.x, mr_center_3f.y, mr_center_3f.z])
-        translation_vector = mr_center - pv_center 
+        translation_vector = pv_center - mr_center
         mr_mesh = translate_mesh_mr(mr_mesh, translation_vector)
 
     return mr_mesh
@@ -73,10 +79,10 @@ def convert_mr_to_pv(mr_mesh: mr.Mesh) -> pv.PolyData:
         mr.saveMesh(mr_mesh, input_path)
         pv_mesh = pv.read(input_path)
         
-        pv_center = pv_mesh.center
+        pv_center = centroid_pv(pv_mesh)
         mr_center_3f = centroid_mr(mr_mesh)
         mr_center = np.array([mr_center_3f.x, mr_center_3f.y, mr_center_3f.z])
-        translation_vector = pv_center - mr_center  
+        translation_vector = mr_center - pv_center
         pv_mesh = pv_mesh.translate(translation_vector, inplace=True)
 
     return pv_mesh
@@ -198,11 +204,119 @@ def translate_mesh_mr(mesh: mr.Mesh, translation_vector) -> mr.Mesh:
     mesh.invalidateCaches()
     return mesh
 
+def thicken_mesh_vtk(surface: pv.PolyData, thickness: float) -> pv.PolyData:
+    """
+    Thickens a surface by extruding each point along its normal, and builds volumetric cells.
+    This version accepts surfaces with either triangular or quadrilateral faces.
+    
+    For each cell:
+      - If it is a triangle (3 vertices), a wedge cell is created (6 nodes).
+      - If it is a quad (4 vertices), a hexahedron cell is created (8 nodes).
+    
+    Parameters
+    ----------
+    surface : pv.PolyData
+        The input surface mesh (with faces as triangles or quads).
+    thickness : float
+        The extrusion distance (along the per-vertex normals).
+    
+    Returns
+    -------
+    pv.PolyData
+        A PyVista PolyData object wrapping the resulting volumetric unstructured grid.
+    """
+    # Ensure normals exist
+    if "Normals" not in surface.point_data:
+        surface = surface.compute_normals(auto_orient_normals=True)
+    
+    points = surface.points
+    normals = surface.point_data["Normals"]
+    n_pts = points.shape[0]
+    
+    # Parse the flat face array into a list of cells.
+    # In PyVista, surface.faces is a flat array: [n0, i0, i1, ..., n1, j0, j1, ...]
+    faces_flat = surface.faces
+    cells_list = []
+    i = 0
+    while i < len(faces_flat):
+        n = faces_flat[i]
+        cell = faces_flat[i+1 : i+1+n]
+        cells_list.append(cell)
+        i += n + 1
+
+    # Create a new vtkPoints array for original and extruded points.
+    extruded_points = vtk.vtkPoints()
+    extruded_points.SetNumberOfPoints(n_pts * 2)
+    for i in range(n_pts):
+        x, y, z = points[i]
+        extruded_points.SetPoint(i, x, y, z)
+    for i in range(n_pts):
+        x, y, z = points[i]
+        nx, ny, nz = normals[i]
+        extruded_points.SetPoint(n_pts + i, x + thickness * nx, 
+                                 y + thickness * ny, z + thickness * nz)
+    
+    # Create an unstructured grid to hold the volumetric cells.
+    extruded_ug = vtk.vtkUnstructuredGrid()
+    extruded_ug.SetPoints(extruded_points)
+    extruded_ug.Allocate()
+    
+    # For each cell in the input, create the corresponding volumetric cell.
+    for cell in cells_list:
+        num_vertices = len(cell)
+        if num_vertices == 3:
+            # Triangle: create a wedge cell (6 nodes).
+            id_list = vtk.vtkIdList()
+            id_list.SetNumberOfIds(6)
+            # bottom triangle vertices:
+            id_list.SetId(0, cell[0])
+            id_list.SetId(1, cell[1])
+            id_list.SetId(2, cell[2])
+            # top triangle vertices:
+            id_list.SetId(3, cell[0] + n_pts)
+            id_list.SetId(4, cell[1] + n_pts)
+            id_list.SetId(5, cell[2] + n_pts)
+            extruded_ug.InsertNextCell(vtk.VTK_WEDGE, id_list)
+        elif num_vertices == 4:
+            # Quad: create a hexahedron (8 nodes).
+            id_list = vtk.vtkIdList()
+            id_list.SetNumberOfIds(8)
+            # bottom quad vertices:
+            id_list.SetId(0, cell[0])
+            id_list.SetId(1, cell[1])
+            id_list.SetId(2, cell[2])
+            id_list.SetId(3, cell[3])
+            # top quad vertices:
+            id_list.SetId(4, cell[0] + n_pts)
+            id_list.SetId(5, cell[1] + n_pts)
+            id_list.SetId(6, cell[2] + n_pts)
+            id_list.SetId(7, cell[3] + n_pts)
+            extruded_ug.InsertNextCell(vtk.VTK_HEXAHEDRON, id_list)
+        else:
+            # For other cell types, you might triangulate them first.
+            raise ValueError(f"Unsupported cell with {num_vertices} vertices. Only triangles and quads are supported.")
+    
+    # Optionally copy point data from the original surface to the new grid.
+    in_pd = surface.GetPointData()
+    out_pd = extruded_ug.GetPointData()
+    out_pd.CopyAllocate(in_pd)
+    for i in range(n_pts):
+        out_pd.CopyData(in_pd, i, i)          # bottom copy
+        out_pd.CopyData(in_pd, i, n_pts + i)    # top copy
+    
+    # Wrap the vtkUnstructuredGrid in a PyVista object.
+    extruded = pv.wrap(extruded_ug)
+    return extruded
+
 def thicken_mesh(surface, thickness, vector = None):
+    surface_copy = surface.copy()
     # Create temporary directory for mesh files
     if isinstance(surface, pv.PolyData):
         type = "pv"
+        # print("pv center before : ", surface.center)   
+        # print("pv centroid before : ", centroid_pv(surface))   
         surface = convert_pv_to_mr(surface)
+        # print("mr center before : ", centroid_mr(surface))   
     else:
         type = "mr"      
 
@@ -218,21 +332,24 @@ def thicken_mesh(surface, thickness, vector = None):
     # 1. Thicken in both directions
     thickened_mesh_mr = mr.thickenMesh(surface, thickness, params)
     
+
+        
     # 2. Thicken only in the interior direction
     extruded_mesh_mr = extrude_mesh(surface, thickness * 10, vector)
 
     # Perform boolean intersection with MRMeshPy
     result = mr.voxelBooleanIntersect(thickened_mesh_mr, extruded_mesh_mr, params.voxelSize)
 
-    # plotter = pv.Plotter()
-    # plotter.add_mesh(convert_mr_to_pv(result), color='green', opacity=0.7, show_edges=True)
-    # plotter.show()
-    
     # Convert back to Pyvista if needed
     if type == "pv":
-        result = convert_mr_to_pv(result)
+        result = convert_mr_to_pv(result)  
 
-
+        # plotter = pv.Plotter()
+        # # plotter.add_mesh(convert_mr_to_pv(thickened_mesh_mr), color='green', opacity=0.4, show_edges=True)
+        # # plotter.add_mesh(convert_mr_to_pv(surface), color='blue', opacity=0.6, show_edges=True)
+        # plotter.add_mesh(surface_copy, color='blue', opacity=0.6, show_edges=True)
+        # plotter.add_mesh(result, color='red', opacity=0.4, show_edges=True)
+        # plotter.show()
     return result
         
     
@@ -255,39 +372,192 @@ def centroid_mr(mesh: mr.Mesh) -> mr.Vector3f:
     else:
         raise ValueError("Mesh has no vertices.")
 
-def get_surface_from_points_2d(line_points_2d) -> pv.PolyData:
-    # Perform Delaunay triangulation
-    delaunay = Delaunay(line_points_2d)
-
-    # Extract the simplices (triangles) from the triangulation
-    simplices = delaunay.simplices
-
-    # Add a Z-coordinate (0) to the 2D points to make them 3D
-    line_points_3d = np.column_stack((line_points_2d, np.zeros(line_points_2d.shape[0])))
+def centroid_pv(mesh: pv.PolyData) -> np.ndarray:
+    # Get the center of the mesh
+    # Calculate centroid by averaging all vertex coordinates
+    points = mesh.points
+    total = np.zeros(3)
+    count = 0
     
-    # Create a PyVista PolyData object from the triangulation
-    surface = pv.PolyData(line_points_3d, np.hstack((np.full((len(simplices), 1), 3), simplices)).astype(int))
+    # Sum all valid vertex coordinates
+    for i in range(len(points)):
+        total += points[i]
+        count += 1
+    
+    # Compute average position
+    if count > 0:
+        center = total / count
+    else:
+        raise ValueError("Mesh has no vertices.")
+    return np.array([center[0], center[1], center[2]])
 
-    return surface
+
+def delaunay2d_surface(points_array: np.ndarray) -> pv.PolyData:
+    # If input points are 2D, add a z=0 coordinate.
+    if points_array.shape[1] == 2:
+        points_array = np.hstack([points_array, np.zeros((points_array.shape[0], 1))])
+    
+    # Create vtkPoints and insert the input points.
+    vtk_pts = vtk.vtkPoints()
+    num_points = points_array.shape[0]
+    for i in range(num_points):
+        x, y, z = points_array[i]
+        vtk_pts.InsertNextPoint(x, y, z)
+    
+    # Create a vtkPolyData to hold the points.
+    polydata = vtk.vtkPolyData()
+    polydata.SetPoints(vtk_pts)
+
+    boundary_polydata = create_boundary_polygon(points_array)
 
 
-def get_surface_within_area(mesh: pv.PolyData, line_points_3d) -> pv.PolyData:
+    boundary = vtk.vtkPolyData()
+    boundary.SetPoints(polydata.GetPoints())
+    # boundary.SetPolys(cellArray)
+    
+    # Create and run the Delaunay2D filter.
+    delaunay = vtk.vtkDelaunay2D()
+    delaunay.SetInputData(polydata)
+    delaunay.SetSourceData(boundary_polydata)
+    delaunay.Update()
+    
+    # Wrap the resulting VTK output in a PyVista PolyData and return it.
+    return pv.wrap(delaunay.GetOutput())
+
+def create_boundary_polygon(points_2d_or_3d: np.ndarray) -> vtk.vtkPolyData:
+    """
+    Takes a closed loop of points (concave or convex) and creates a vtkPolyData
+    with a single polygon cell representing that boundary.
+    """
+    # points_2d_or_3d = ensure_counterclockwise(points_2d_or_3d)
+
+    # Ensure shape is (N,3) by adding z=0 if needed
+    if points_2d_or_3d.shape[1] == 2:
+        points_2d_or_3d = np.hstack([points_2d_or_3d, np.zeros((points_2d_or_3d.shape[0], 1))])
+
+    # points_2d_or_3d = np.flip(points_2d_or_3d, axis=0)
+
+    # Build vtkPoints
+    vtk_points = vtk.vtkPoints()
+    for i in range(len(points_2d_or_3d)):
+        x, y, z = points_2d_or_3d[i]
+        vtk_points.InsertNextPoint(x, y, z)
+
+    # Create a single polygon cell referencing these points
+    polygon = vtk.vtkPolygon()
+    polygon.GetPointIds().SetNumberOfIds(len(points_2d_or_3d))
+    for i in range(len(points_2d_or_3d)):
+        polygon.GetPointIds().SetId(i, i)
+
+    # Add the polygon cell to a vtkCellArray
+    cells = vtk.vtkCellArray()
+    cells.InsertNextCell(polygon)
+
+    # Create polydata
+    boundary = vtk.vtkPolyData()
+    boundary.SetPoints(vtk_points)
+    boundary.SetPolys(cells)
+
+    return boundary
+    
+def ensure_counterclockwise(points_2d: np.ndarray, counterclockwise=True) -> np.ndarray:
+    """
+    Ensures a polygon defined by 2D points has the specified orientation.
+    
+    Parameters
+    ----------
+    points_2d : np.ndarray
+        A 2D NumPy array of shape (N, 2), representing a polygon in the xy-plane.
+        The polygon can be either open or closed (first point = last point).
+    counterclockwise : bool, default=True
+        If True, ensures points are in counterclockwise order.
+        If False, ensures points are in clockwise order.
+
+    Returns
+    -------
+    np.ndarray
+        A 2D NumPy array of the same shape, with the requested orientation.
+    """
+
+    # If the polygon is closed (first point == last point), ignore the last point for area calculation
+    closed = np.allclose(points_2d[0], points_2d[-1])
+    if closed:
+        pts = points_2d[:-1]  # skip the repeated last point for area calc
+    else:
+        pts = points_2d
+
+    # Shoelace formula for signed area
+    # area > 0 => counterclockwise, area < 0 => clockwise
+    x = pts[:, 0]
+    y = pts[:, 1]
+    # roll arrays by 1 for the "next" vertex
+    area = np.sum(x * np.roll(y, -1) - y * np.roll(x, -1)) / 2.0
+
+    # Determine if we need to reverse the points based on current orientation and desired orientation
+    if (counterclockwise and area < 0) or (not counterclockwise and area >= 0):
+        return np.flip(points_2d, axis=0)
+    else:
+        # Already in the desired orientation
+        return points_2d
+    
+# def get_surface_from_points_2d(line_points_2d) -> pv.PolyData:
+#     # Perform Delaunay triangulation
+#     delaunay = Delaunay(line_points_2d)
+
+#     # Extract the simplices (triangles) from the triangulation
+#     simplices = delaunay.simplices
+
+#     # Add a Z-coordinate (0) to the 2D points to make them 3D
+#     line_points_3d = np.column_stack((line_points_2d, np.zeros(line_points_2d.shape[0])))
+    
+#     # Create a PyVista PolyData object from the triangulation
+#     surface = pv.PolyData(line_points_3d, np.hstack((np.full((len(simplices), 1), 3), simplices)).astype(int))
+
+#     return surface
+
+def unique_points(line_points_3d) -> np.ndarray:
+    """
+    Remove duplicate points from line_points_3d.
+    """
+    unique_points = []
+    for i, point in enumerate(line_points_3d):
+        # Skip if this point is identical to the previous one
+        if i > 0 and np.allclose(point, line_points_3d[i-1], rtol=1e-5, atol=1e-5):
+            continue
+        unique_points.append(point)
+    
+    # Check if the last point is the same as the first (closed loop)
+    if len(unique_points) > 1 and np.allclose(unique_points[0], unique_points[-1], rtol=1e-5, atol=1e-5):
+        unique_points = unique_points[:-1]  # Remove the last point if it's the same as first
+
+    return np.array(unique_points)
+
+
+def get_surface_within_area(mesh: pv.PolyData, line_points_3d, line_hole_3d = None) -> pv.PolyData:
     #TODO: extrude in normal direction instead of Z
     # vector = compute_normals(mesh)
     try:
+        # Remove duplicate points from line_points_3d
+        line_points_3d = unique_points(line_points_3d)
+
+        # Ensure we have enough points for triangulation
+        if len(line_points_3d) < 3:
+            return None, "Error: Not enough unique points to create a surface"
+        
         # Extract the 2D polygon outline in the XY plane
         polygon_points = line_points_3d[:, :2]  # Keep only X and Y coordinates
-        surface = get_surface_from_points_2d(polygon_points)
+        polygon_points = ensure_counterclockwise(polygon_points)
+        surface = delaunay2d_surface(polygon_points)
 
         # Create a selection volume by extruding far in z-direction (both ways)
         points = mesh.points
-        z_min, z_max = np.min(points[:, 2]), np.max(points[:, 2])
+        z_min, z_max = np.min(polygon_points), np.max(points[:, 2])
         z_range = z_max - z_min
         extrusion = surface.extrude((0, 0, 2*z_range), capping=True)
         extrusion.translate((0, 0, z_min - z_range/2), inplace=True)
         
         # Select the part of the face mesh inside the extrusion
-        surface = mesh.clip_surface(extrusion)
+        surface = mesh.clip_surface(extrusion,invert=False)
 
         return surface, ""
     
@@ -301,11 +571,12 @@ def remove_surface_within_area(mesh, line_points_3d):
     """
     # vector = compute_normals(mesh)
     vector = np.array([0, 0, 1])  # Default extrusion direction
+    line_points_3d = unique_points(line_points_3d)
 
     # Project line_points_3d onto the XY plane
     polygon_points = line_points_3d[:, :2]  # Keep only X and Y coordinates
-        
-    surface = get_surface_from_points_2d(polygon_points)
+    polygon_points = ensure_counterclockwise(polygon_points)
+    surface = delaunay2d_surface(polygon_points)
     extrusion = extrude_mesh(surface, 50, vector=vector)
     mesh_center = mesh.center
     extrusion_center = extrusion.center
@@ -319,9 +590,21 @@ def remove_surface_within_area(mesh, line_points_3d):
 
     # plotter = pv.Plotter()
     # plotter.add_mesh(mesh, color='gray', opacity=0.2, show_edges=True)
-    # plotter.add_mesh(extrusion, color='lightblue', opacity=0.5, show_edges=True)
+    # plotter.add_mesh(extrusion, color='lightblue', opacity=0.2, show_edges=True)
+    # plotter.add_mesh(surface, color='blue', opacity=0.5, show_edges=True)
     # plotter.add_mesh(clipped_mesh, color='red', opacity=0.7, show_edges=True)
     # plotter.add_mesh(pv.PolyData(line_points_3d), color='yellow', point_size=10, render_points_as_spheres=True)
+    # for i, point in enumerate(line_points_3d):
+    #     plotter.add_point_labels(
+    #         point, 
+    #         [f"{i}"], 
+    #         font_size=12, 
+    #         text_color='black',
+    #         point_color='red', 
+    #         point_size=10, 
+    #         render_points_as_spheres=True,
+    #         shape_opacity=0.7
+    #     )
     # plotter.show()
 
     return clipped_mesh
@@ -485,3 +768,309 @@ def clean_and_smooth(mesh, smooth_iter=50, clean_tol=1e-3):
 
     return mesh
 
+def loft_between_line_points(source_points1, source_points2, resolution=50):
+    if len(source_points1) != len(source_points2):
+        raise ValueError("Both curves must have the same number of points.")
+
+    num_points = len(source_points1)
+
+    # Create vtkPoints and insert all points sequentially (curve1 then curve2)
+    points = vtk.vtkPoints()
+    for pt in source_points1:
+        points.InsertNextPoint(pt)
+    for pt in source_points2:
+        points.InsertNextPoint(pt)
+
+    # Create two separate lines explicitly
+    lines = vtk.vtkCellArray()
+
+    # First polyline (curve 1)
+    line1 = vtk.vtkPolyLine()
+    line1.GetPointIds().SetNumberOfIds(num_points)
+    for i in range(num_points):
+        line1.GetPointIds().SetId(i, i)
+    lines.InsertNextCell(line1)
+
+    # Second polyline (curve 2)
+    line2 = vtk.vtkPolyLine()
+    line2.GetPointIds().SetNumberOfIds(num_points)
+    for i in range(num_points):
+        line2.GetPointIds().SetId(i, num_points + i)
+    lines.InsertNextCell(line2)
+
+    # Prepare input polydata
+    input_polydata = vtk.vtkPolyData()
+    input_polydata.SetPoints(points)
+    input_polydata.SetLines(lines)
+
+    # Create ruled surface filter and set parameters
+    ruled_surface = vtk.vtkRuledSurfaceFilter()
+    ruled_surface.SetInputData(input_polydata)
+    ruled_surface.SetResolution(resolution, resolution)
+    ruled_surface.SetRuledModeToResample()
+    ruled_surface.CloseSurfaceOff()  # avoid closing to make it open
+    ruled_surface.PassLinesOn()
+    ruled_surface.OrientLoopsOn()
+    ruled_surface.Update()
+
+    # Return PyVista mesh
+    return pv.wrap(ruled_surface.GetOutput())
+
+
+
+
+def extrude_half_tube_on_face_along_line(line_points: np.ndarray,
+                                           face_normals: np.ndarray,
+                                           radius: float,
+                                           n_cs_points: int = 20) -> (pv.PolyData, np.ndarray, np.ndarray, np.ndarray):
+    """
+    Create a half-tubular surface that lays on a face by lofting half-circular cross-sections along a centerline.
+    The cross-section is oriented so that its flat edge (chord) is tangent to the centerline and the curved portion
+    extends outward according to the face normals. The "top" of the half circle is stored in top_points.
+    
+    If the centerline is closed (first point equals the last point within tolerance), the lateral surface
+    is wrapped (first and last cross-sections are connected) so that no end cap is created.
+    
+    Parameters
+    ----------
+    line_points : np.ndarray
+        An (N,3) array representing the centerline of the tube.
+    face_normals : np.ndarray
+        An (N,3) array representing the face normal at each centerline point.
+    radius : float
+        The tube radius (thickness).
+    n_cs_points : int, optional
+        Number of points to sample the half cross-section (default 20).
+    
+    Returns
+    -------
+    pv.PolyData
+        A PyVista PolyData object representing the lofted half-tubular surface.
+    np.ndarray
+        An (N,3) array of the "top" points of each cross-section.
+    np.ndarray
+        An (n_cs_points,3) array of points in the first cross-section.
+    np.ndarray
+        An (n_cs_points,3) array of points in the last cross-section.
+    """
+    N = line_points.shape[0]
+    if face_normals.shape[0] != N:
+        raise ValueError("line_points and face_normals must have the same number of points.")
+    
+    # Define half circle in local coordinates.
+    # Using theta in [0, π/2] produces a half circle.
+    # (For a full half tube, you might use the range [0, π], but here we assume
+    # that the half cross-section is defined over [0, π/2] for your specific case.)
+    angles = np.linspace(0, np.pi/2, n_cs_points)
+    local_cs = np.column_stack((radius * np.cos(angles),
+                                radius * np.sin(angles)))  # shape: (n_cs_points, 2)
+        
+    # Check if the centerline is closed (first and last points coincide within a tolerance)
+    closed_loop = np.allclose(line_points[0], line_points[-1], atol=1e-6)
+    if closed_loop:
+        # Remove the duplicate last point to avoid duplicate cross-section.
+        line_points = line_points[:-1]
+        face_normals = face_normals[:-1]
+        N = line_points.shape[0]
+    
+    cross_sections = []  # will store each cross-section (n_cs_points, 3)
+    top_points_list = []  # will store the "top" point from each cross-section
+
+    for i in range(N):
+        p = line_points[i]
+
+        # Estimate tangent T at point p:
+        if i == 0:
+            T = line_points[i+1] - p
+        elif i == N - 1:
+            T = p - line_points[i-1]
+        else:
+            T = (line_points[i+1] - line_points[i-1]) * 0.5
+        T_norm = np.linalg.norm(T)
+        if T_norm < 1e-6:
+            T = np.array([1, 0, 0])
+        else:
+            T = T / T_norm
+
+        # Get face normal F at p (normalize if needed)
+        F = face_normals[i]
+        F_norm = np.linalg.norm(F)
+        if F_norm < 1e-6:
+            F = np.array([0, 0, 1])
+        else:
+            F = F / F_norm
+
+        # Compute U as the projection of F onto the plane perpendicular to T.
+        U = F - np.dot(F, T) * T
+        U_norm = np.linalg.norm(U)
+        if U_norm < 1e-6:
+            U = np.cross(T, np.array([0, 0, 1]))
+            if np.linalg.norm(U) < 1e-6:
+                U = np.cross(T, np.array([0, 1, 0]))
+            U = U / np.linalg.norm(U)
+        else:
+            U = U / U_norm
+
+        # Ensure U points in the "outward" direction.
+        # If the dot product with F is positive, reverse U.
+        if np.dot(U, F) > 0:
+            U = -U
+
+        # Compute V as the normalized cross product: V = cross(T, U)
+        V = np.cross(T, U)
+        V = V / np.linalg.norm(V)
+        
+        # Map local cross-section points (x,y) to global.
+        # To have the bottom of the tube (flat edge) touch the centerline,
+        # shift the local cross-section by -radius*U.
+        cs_global = np.array([ p - radius * U + (pt[0] * U) + (pt[1] * V)
+                               for pt in local_cs ])
+        cross_sections.append(cs_global)
+                
+        # The "top" of the half circle corresponds to local coordinates (0, radius) (theta = π/2).
+        top_point = p - radius * U + 0 * U + radius * V
+        top_points_list.append(top_point)
+    
+    # Assemble all cross-section points into a single vtkPoints object.
+    total_cs_pts = N * n_cs_points
+    vtk_pts = vtk.vtkPoints()
+    vtk_pts.SetNumberOfPoints(total_cs_pts)
+    for i in range(N):
+        for j in range(n_cs_points):
+            idx = i * n_cs_points + j
+            pt = cross_sections[i][j]
+            vtk_pts.SetPoint(idx, pt[0], pt[1], pt[2])
+    
+    # Build connectivity: create quad cells connecting adjacent cross-sections.
+    cells = vtk.vtkCellArray()
+
+    if closed_loop:
+        # Wrap-around connectivity: i goes from 0 to N-1, with next = (i+1) mod N.
+        for i in range(N):
+            next_i = (i + 1) % N
+            for j in range(n_cs_points - 1):
+                quad = vtk.vtkQuad()
+                quad.GetPointIds().SetId(0, i * n_cs_points + j)
+                quad.GetPointIds().SetId(1, i * n_cs_points + j + 1)
+                quad.GetPointIds().SetId(2, next_i * n_cs_points + j + 1)
+                quad.GetPointIds().SetId(3, next_i * n_cs_points + j)
+                cells.InsertNextCell(quad)
+    else:
+        # Non-closed centerline: i goes from 0 to N-2.
+        for i in range(N - 1):
+            for j in range(n_cs_points - 1):
+                quad = vtk.vtkQuad()
+                quad.GetPointIds().SetId(0, i * n_cs_points + j)
+                quad.GetPointIds().SetId(1, i * n_cs_points + j + 1)
+                quad.GetPointIds().SetId(2, (i + 1) * n_cs_points + j + 1)
+                quad.GetPointIds().SetId(3, (i + 1) * n_cs_points + j)
+                cells.InsertNextCell(quad)
+    
+    # Create the output vtkPolyData.
+    polydata = vtk.vtkPolyData()
+    polydata.SetPoints(vtk_pts)
+    polydata.SetPolys(cells)
+    
+    # Convert top points list to numpy array.
+    top_points = np.array(top_points_list)
+
+    # Get first and last cross-section points
+    first_cs = cross_sections[0]
+    last_cs = cross_sections[-1]
+
+    # Convert the resulting vtkPolyData to a PyVista PolyData object.
+    pv_polydata = pv.wrap(polydata)
+    
+    return pv_polydata, top_points, first_cs, last_cs
+
+def reorder_line_points(line_points: np.ndarray, pt: np.ndarray) -> np.ndarray:
+    """
+    Reorder the line points so that the first point is the one closest to 'pt'
+    while keeping the original order of the points.
+    
+    If the line is not closed (first point ≠ last point), the first point is
+    appended at the end to close the loop.
+    
+    Parameters
+    ----------
+    line_points : np.ndarray
+        An (N,3) array representing the points of the line.
+    pt : np.ndarray
+        A 3D point.
+    
+    Returns
+    -------
+    np.ndarray
+        The reordered (and closed) array of line points.
+    """
+    # Compute distances from each point to the given pt
+    distances = np.linalg.norm(line_points - pt, axis=1)
+
+    # Find index of the closest point
+    min_distance = np.min(distances)
+    closest_indices = np.where(distances == min_distance)[0]
+    # If there are multiple points with the same minimum distance, take the one with the lowest index
+    closest_idx = np.min(closest_indices)
+
+    # Roll the array so that the closest point becomes the first element
+    reordered = np.roll(line_points, -closest_idx, axis=0)
+    
+    # Ensure the line is closed by appending the first point if necessary
+    if not np.allclose(reordered[0], reordered[-1]):
+        reordered = np.vstack([reordered, reordered[0]])
+    
+    return reordered
+
+def deform_surface_at_point(surface, center_point, radius, strength, inside_direction=False):
+    """
+    Apply a smooth deformation to a surface around a center point.
+    
+    Parameters:
+    -----------
+    surface : pv.PolyData
+        The surface to deform
+    center_point : array-like
+        The center point of deformation (x, y, z)
+    radius : float
+        The radius of influence for deformation (in mm)
+    strength : float
+        The maximum displacement strength
+    inside_direction : boolean, optional
+        Direction of displacement. 
+    
+    Returns:
+    --------
+    pv.PolyData
+        Deformed surface
+    """
+    deformed = surface.copy()
+    points = deformed.points
+    
+    # Find the closest point on the surface to the center_point
+    center_idx = deformed.find_closest_point(center_point)
+    center_on_surface = deformed.points[center_idx]
+    
+    # Compute displacement direction
+    if "Normals" not in deformed.point_data:
+        deformed.compute_normals(inplace=True)
+    direction = deformed.point_data["Normals"][center_idx]
+    
+    direction = np.array(direction)
+    direction = direction / np.linalg.norm(direction)
+    
+    if inside_direction == True:
+        direction = -direction
+
+    # Compute distances from all points to center
+    distances = np.linalg.norm(points - center_on_surface, axis=1)
+    
+    # Apply smooth falloff (using cosine falloff)
+    mask = distances < radius
+    normalized_distances = distances[mask] / radius
+    falloff = np.cos(np.pi * normalized_distances / 2) ** 2  # Cosine squared falloff
+    
+    # Apply displacement
+    displacement = strength * falloff[:, np.newaxis] * direction
+    points[mask] += displacement
+    
+    return deformed

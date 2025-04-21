@@ -7,6 +7,8 @@ import numpy as np
 import cv2
 from utils import create_pyvista_mesh, smooth_line_points, compute_rotation_between_vectors
 from config import DEFAULT_FACE_CONTOUR_LANDMARKS
+import pyvista as pv
+import matplotlib.pyplot as plt
 
 
 def extract_face_landmarks(mesh_path):
@@ -33,15 +35,86 @@ def extract_face_landmarks(mesh_path):
     mesh.compute_vertex_normals()
 
     # Align face mesh
-    aligned_mesh = align_face_mesh_3d(mesh)
+    aligned_mesh = align_face_to_front_view(mesh)
+    pivot = aligned_mesh.get_center()
+    
 
     # Extract landmarks from the aligned mesh
-    width, height = 800, 800
-    landmarks_3d, valid_indices = extract_landmarks_from_front_view(aligned_mesh, width, height)
+    landmarks_3d, valid_indices = extract_landmarks_from_view(aligned_mesh)
+
+    # rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle([0, np.radians(20), 0])
+    # rotated_mesh1 = rotate_face(aligned_mesh, rotation_matrix, pivot)
+    # landmarks_3d_rotated1, landmarks_valid_rotated1 = extract_landmarks_from_view(rotated_mesh1)
+    # rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle([0, np.radians(-20), 0])
+    # landmarks_3d_rotated1 = rotate_landmarks(landmarks_3d_rotated1, rotation_matrix, pivot)
+
+    # rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle([0, np.radians(-20), 0])
+    # rotated_mesh2 = rotate_face(aligned_mesh, rotation_matrix, pivot)
+    # landmarks_3d_rotated2, landmarks_valid_rotated2 = extract_landmarks_from_view(rotated_mesh2)
+    # rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle([0, np.radians(20), 0])
+    # landmarks_3d_rotated2 = rotate_landmarks(landmarks_3d_rotated2, rotation_matrix, pivot)
+
+
+    # # Display the extracted image color on the screen
+    # keep_indices = DEFAULT_FACE_CONTOUR_LANDMARKS
+    # plotter = pv.Plotter()
+    # plotter.add_title("Face Mesh with Landmarks")
+
+    # aligned_mesh_pyvista = create_pyvista_mesh(aligned_mesh)
+    # plotter.add_mesh(aligned_mesh_pyvista, color='white', opacity=0.5)
+
+    # # Front landmarks
+    # landmarks = np.array([landmarks_3d[i] for i in keep_indices if i in valid_indices])
+    # plotter.add_points(landmarks, color='red', point_size=6, render_points_as_spheres=True)
+    # for idx, point in zip(keep_indices, landmarks):
+    #     plotter.add_point_labels([point], [str(idx)], font_size=15, text_color='red', shape_opacity=0.0)
+
+
+    # # Rotated landmarks
+    # landmarks = np.array([landmarks_3d_rotated1[i] for i in keep_indices if i in landmarks_valid_rotated1])
+    # plotter.add_points(landmarks, color='blue', point_size=6, render_points_as_spheres=True)
+    # for idx, point in zip(keep_indices, landmarks):
+    #     plotter.add_point_labels([point], [str(idx)], font_size=15, text_color='blue', shape_opacity=0.0)
+
+
+    # # Rotated landmarks 2
+    # landmarks = np.array([landmarks_3d_rotated2[i] for i in keep_indices if i in landmarks_valid_rotated2])
+    # plotter.add_points(landmarks, color='green', point_size=6, render_points_as_spheres=True)
+    # for idx, point in zip(keep_indices, landmarks):
+    #     plotter.add_point_labels([point], [str(idx)], font_size=15, text_color='green', shape_opacity=0.0)
+
+
+
+
+    # plotter.view_xy()  # Set to front view (looking at XY plane)
+    # plotter.enable_zoom_style()
+    # plotter.enable_trackball_style()
+    # plotter.show()
 
     return aligned_mesh, landmarks_3d, valid_indices
 
-def align_face_mesh_3d(mesh):
+
+def rotate_face(mesh, rotation_matrix, pivot = None):
+    rotated_mesh = o3d.geometry.TriangleMesh(mesh)
+    if pivot is None:
+        pivot = rotated_mesh.get_center()
+    rotated_mesh.rotate(rotation_matrix, center=pivot)
+
+    return rotated_mesh
+
+
+def rotate_landmarks(landmarks, rotation_matrix, pivot=None):
+    if pivot is None:
+        pivot = np.mean(landmarks, axis=0)
+
+    landmarks_centered = landmarks - pivot
+    rotated_landmarks = np.dot(landmarks_centered, rotation_matrix.T)
+    rotated_landmarks += pivot
+    
+    return rotated_landmarks
+
+
+def align_face_to_front_view(mesh, width = 800, height = 800):
     """
     Align a face mesh in 3D space using a two-stage process:
     1. First rotation (around X/Y) to make the nose axis vertical
@@ -57,11 +130,10 @@ def align_face_mesh_3d(mesh):
     aligned_mesh : o3d.geometry.TriangleMesh
         The aligned 3D face mesh
     """
-    width, height = 800, 800
 
     # Extract initial landmarks
     try:
-        landmarks_3d, valid_indices = extract_landmarks_from_front_view(mesh, width, height)
+        landmarks_3d, valid_indices = extract_landmarks_from_view(mesh, width, height)
         # Identify key nose landmarks
         nose_top_idx = np.where(valid_indices == 168)[0][0]
         nose_bottom_idx = np.where(valid_indices == 200)[0][0]
@@ -80,7 +152,7 @@ def align_face_mesh_3d(mesh):
 
         # Stage 2: Eye balance
         # Re-extract landmarks after the first rotation
-        landmarks_3d_2, valid_indices_2 = extract_landmarks_from_front_view(mesh_aligned_stage1, width, height)
+        landmarks_3d_2, valid_indices_2 = extract_landmarks_from_view(mesh_aligned_stage1, width, height)
         left_eye_idx = np.where(valid_indices_2 == 33)[0][0]
         right_eye_idx = np.where(valid_indices_2 == 263)[0][0]
 
@@ -102,7 +174,7 @@ def align_face_mesh_3d(mesh):
         print(f"Alignment failed: {e}")
         return mesh
 
-def extract_landmarks_from_front_view(mesh, width=800, height=800):
+def extract_landmarks_from_view(mesh, width=800, height=800):
     """
     Extract 2D and 3D landmarks from a mesh using MediaPipe.
     
@@ -159,6 +231,16 @@ def extract_landmarks_from_front_view(mesh, width=800, height=800):
         y_px = int(lm.y * height)
         points_2d.append((x_px, y_px))
     
+    # # Plot the color image and 2D landmarks
+    # plt.figure(figsize=(10, 10))
+    # plt.imshow(cv2.cvtColor(image_color_cv, cv2.COLOR_BGR2RGB))
+    # points_2d_np = np.array(points_2d)
+    # plt.scatter(points_2d_np[:, 0], points_2d_np[:, 1], c='red', s=10)
+    # plt.title("2D Landmarks on Color Image")
+    # plt.axis('off')
+    # plt.show()
+
+
     # 3D projection
     points_3d = []
     for (x_px, y_px) in points_2d:
@@ -182,31 +264,61 @@ def extract_landmarks_from_front_view(mesh, width=800, height=800):
     valid_mask = ~np.isnan(points_3d).any(axis=1)
     valid_points_3d = points_3d[valid_mask]
     valid_indices = np.where(valid_mask)[0]
-    
+
+    # # Plot the mesh and 3D points using PyVista
+    # plotter = pv.Plotter()
+    # plotter.add_title("3D Mesh and Landmarks")
+
+    # # Add the mesh
+    # mesh_pyvista = create_pyvista_mesh(mesh)
+    # plotter.add_mesh(mesh_pyvista, color='white', opacity=0.5)
+
+    # # Add the valid 3D points
+    # plotter.add_points(valid_points_3d, color='red', point_size=6, render_points_as_spheres=True)
+
+    # plotter.view_xy()  # Set to front view (looking at XY plane)
+    # plotter.enable_zoom_style()
+    # plotter.enable_trackball_style()
+    # plotter.show()
+
     return valid_points_3d, valid_indices
 
 def extract_line_from_landmarks(mesh, landmarks, landmark_indices, contour_landmark_ids=DEFAULT_FACE_CONTOUR_LANDMARKS):
     """
     Extract face contour line from landmarks and project it onto the face mesh.
     """
-    pv_mesh = create_pyvista_mesh(mesh)
-    
     valid_ids = [np.where(landmark_indices == lid)[0][0] 
                  for lid in contour_landmark_ids if lid in landmark_indices]
     
+    closed = contour_landmark_ids[0] == contour_landmark_ids[-1]
     line_points = landmarks[valid_ids]
-    line_points = smooth_line_points(line_points, smoothing=0.1, num_samples=300)
+    line_points = smooth_line_points(line_points, smoothing=0.05, num_samples=100, closed=closed)   
     
-    bounds = pv_mesh.bounds
+    # if hasattr(mesh, 'compute_triangle_normals'):
+    #     mesh.compute_triangle_normals()
+
+    if "Normals" not in mesh.point_data:
+        mesh = mesh.compute_normals()
+
+
+    bounds = mesh.bounds
     dz = 100
     projected_line_points = []
+    projected_normals = []
     for pt in line_points:
         origin = (pt[0], pt[1], bounds[5] + dz)
         end = (pt[0], pt[1], bounds[4] - dz)
-        pts, _ = pv_mesh.ray_trace(origin, end, first_point=True)
+        pts, ids = mesh.ray_trace(origin, end, first_point=True)
         if pts.size:
             projected_line_points.append(pts)
+            
+            idx = mesh.find_closest_point(pt)
+            n = mesh.point_data["Normals"][idx]
+            n = n / np.linalg.norm(n)
+            projected_normals.append(n)
         else:
             projected_line_points.append(pt)
+            projected_normals.append(np.array([0.0, 0.0, 1.0]))  # Default normal
     
-    return np.array(projected_line_points)
+    return np.array(projected_line_points), np.array(projected_normals)
+    # return np.array(projected_line_points)

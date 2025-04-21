@@ -43,62 +43,25 @@ def visualize_3d_landmarks(points_3d, title="Landmarks 3D"):
     
     return fig
 
-def visualize_mesh_with_landmarks(mesh, landmarks, landmark_indices=None, plotter=None, contour_landmark_ids=None):
+def visualize_mesh_with_landmarks(plotter, mesh, landmarks, landmark_indices, keep_indices = None):
     """Visualize 3D mesh with landmarks and IDs"""
-    if plotter is None:
-        plotter = pv.Plotter()
-        return_plotter = True
-    else:
-        return_plotter = False
-    
+
     pv_mesh = create_pyvista_mesh(mesh)
     plotter.add_mesh(pv_mesh, color='white', opacity=0.5)
 
     # Add landmarks with their IDs
-    landmarks = np.array(landmarks)
-    plotter.add_points(landmarks, color='red', point_size=6, render_points_as_spheres=True)
-
-    if landmark_indices is None:
-        landmark_indices = np.arange(len(landmarks))
-
-    for idx, point in zip(landmark_indices, landmarks):
-        plotter.add_point_labels([point], [str(idx)], font_size=10, text_color='blue', shape_opacity=0.0)
-
-    # Draw green line joining specified landmark IDs
-    if contour_landmark_ids is None:
-        contour_landmark_ids = DEFAULT_FACE_CONTOUR_LANDMARKS
-        
-    valid_ids = [np.where(landmark_indices == id)[0][0] for id in contour_landmark_ids if id in landmark_indices]
-    line_points = landmarks[valid_ids]
-    line_points = smooth_line_points(line_points, smoothing=0.1, num_samples=300)
-    line = pv.lines_from_points(line_points, close=True)
-    plotter.add_mesh(line, color='green', line_width=2)
-    
-    # Project green line onto the face using a front-view projection (along Z)
-    bounds = pv_mesh.bounds
-    dz = 100  # offset for ray tracing
-    projected_line_points = []
-    for pt in line_points:
-        origin = (pt[0], pt[1], bounds[5] + dz)
-        end = (pt[0], pt[1], bounds[4] - dz)
-        pts, ind = pv_mesh.ray_trace(origin, end, first_point=True)
-        if pts.size:
-            projected_line_points.append(pts)
-        else:
-            projected_line_points.append(pt)
-            
-    if len(projected_line_points) > 1:
-        proj_line = pv.lines_from_points(np.array(projected_line_points), close=False)
-        plotter.add_mesh(proj_line, color='orange', line_width=4)
-    
-    # Set to front view
-    set_front_view(plotter)
-    
-    if return_plotter:
-        plotter.show_grid()
-        return plotter, projected_line_points
+    if keep_indices is not None:
+        # Keep only landmarks corresponding to given IDs
+        landmarks = np.array([landmarks[i] for i in keep_indices])
     else:
-        return projected_line_points
+        landmarks = np.array(landmarks)
+
+    plotter.add_points(landmarks, color='green', point_size=4, render_points_as_spheres=True)
+    # for idx, point in zip(landmark_indices, landmarks):
+    #     plotter.add_point_labels([point], [str(idx)], font_size=10, text_color='blue', shape_opacity=0.0)
+
+    
+    return plotter
 
 def visualize_contact_line(mesh, line_points, plotter=None):
     """Visualize 3D mesh with contact line"""

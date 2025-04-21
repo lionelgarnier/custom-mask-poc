@@ -10,6 +10,7 @@ import pyvista as pv
 import tkinter as tk
 from tkinter import filedialog
 import importlib
+import cv2
 
 from config import DEFAULT_FACE_CONTOUR_LANDMARKS, DEFAULT_VISUALIZATION_SETTINGS, DEFAULT_PRINTING_SETTINGS, DEFAULT_FILE_SETTINGS, DEFAULT_MODEL, OUTPUT_FOLDER
 from face import extract_face_landmarks
@@ -67,7 +68,13 @@ def load_model(model_name):
     model_class = getattr(module, class_name)
     return model_class()
 
-def process_face(mesh_path, model_name, show_3d_print=False, create_3d_print=True, save_3d_print=True):
+def process_face(mesh_path, 
+                 model_name, 
+                 show_3d_print=False, 
+                 create_3d_print=True, 
+                 save_3d_print=True, 
+                 show_landmarks_2d=False, 
+                 show_landmarks_3d=False):
     """
     Main function to process a face model and extract landmarks
     
@@ -86,6 +93,17 @@ def process_face(mesh_path, model_name, show_3d_print=False, create_3d_print=Tru
     """
     # Process the face to extract landmarks and contour
     face_mesh, face_landmarks, valid_indices = extract_face_landmarks(mesh_path)
+    
+    # # Display the extracted image color on the screen
+    # keep_indices = None
+    # landmarks_plotter = pv.Plotter()
+    # landmarks_plotter.add_title("Face Mesh with Landmarks")
+    # landmarks_plotter = visualize_mesh_with_landmarks(landmarks_plotter, face_mesh, face_landmarks, valid_indices, keep_indices)
+    
+    # landmarks_plotter.view_xy()  # Set to front view (looking at XY plane)
+    # landmarks_plotter.enable_zoom_style()
+    # landmarks_plotter.enable_trackball_style()
+    # landmarks_plotter.show()
     
     # Create 3D printable object if requested
     if create_3d_print:
@@ -145,7 +163,9 @@ if __name__ == "__main__":
                     args.model,
                     show_3d_print=vis_settings['SHOW_3D_PRINT'],
                     create_3d_print=print_settings['CREATE_3D_PRINT'],
-                    save_3d_print=print_settings['SAVE_3D_PRINT']   
+                    save_3d_print=print_settings['SAVE_3D_PRINT'],
+                    show_landmarks_2d=vis_settings['SHOW_LANDMARKS_2D'],
+                    show_landmarks_3d=vis_settings['SHOW_LANDMARKS_3D'],   
                     )
     else:
         print("No mesh file selected. Exiting.")
