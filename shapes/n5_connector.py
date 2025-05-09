@@ -1,41 +1,59 @@
 import pyvista as pv
 import numpy as np
+import vtk
+from vtkmodules.vtkFiltersGeneral import vtkBooleanOperationPolyDataFilter
+from pymeshfix import MeshFix
 
 class N5Connector:
     def create_3d_object(self, output_path=None, **kwargs):
         # Tube parameters
-        height_mm = 7.0
+        height_mm = 5.0
         outside_radius = 34.0 / 2.0
         inside_radius = 29.0 / 2.0
-        
-        # Create the outer cylinder
-        outer_cylinder = pv.Cylinder(
-            center=(0, 0, height_mm / 2.0),
-            direction=(0, 0, 1),
-            radius=outside_radius,
-            height=height_mm
-        ).triangulate()
-        
 
-        # Create the inner cylinder
-        inner_cylinder = pv.Cylinder(
-            center=(0, 0, height_mm / 2.0),
-            direction=(0, 0, 1),
-            radius=inside_radius,
-            height=height_mm + 2.0
-        ).triangulate()
-        
-        # Boolean difference to hollow out the inside
-        shape = outer_cylinder.boolean_difference(inner_cylinder)
-        
-        shape = self.create_notch(shape, outside_radius, height_mm, 70, 2.0, 1.0)
-        shape = self.create_notch(shape, outside_radius, height_mm, 115, 2.0, 1.0)
-        shape = self.create_notch(shape, outside_radius, height_mm, 245, 2.0, 1.0)
-        shape = self.create_notch(shape, outside_radius, height_mm, 290, 2.0, 1.0)
+        ring = (
+            pv.Disc(inner=inside_radius,
+                    outer=outside_radius,
+                    c_res=128, 
+                    r_res=1)
+            .triangulate()
+            .clean(tolerance=1e-6)
+        )
 
-        # plotter = pv.Plotter()
-        # plotter.add_mesh(shape, color='green', opacity=0.4, show_edges=True)
-        # plotter.show()
+        cylinder = (
+            ring.extrude([0, 0, height_mm], capping=True)
+            .triangulate()
+            .clean(tolerance=1e-6)
+        )
+
+        # Add a half torus to the connector to avoid supports during 3d printing
+        major_R = (outside_radius + inside_radius) / 2.0
+        minor_r = (outside_radius - inside_radius) / 2.0
+        half_torus = (
+            pv.ParametricTorus(ringradius=major_R,
+                            crosssectionradius=minor_r,
+                            u_res=128, v_res=64)
+            .triangulate()
+            .clean(tolerance=1e-6)
+            .clip_closed_surface('-z')      # bottom half, already capped
+        )
+
+
+        ring_height = 0
+        notch_height = height_mm + ring_height
+        cylinder = self.create_notch(cylinder, outside_radius, notch_height,  70, 2.0, 1.0, -ring_height)
+        cylinder = self.create_notch(cylinder, outside_radius, notch_height, 115, 2.0, 1.0, -ring_height)
+        cylinder = self.create_notch(cylinder, outside_radius, notch_height, 245, 2.0, 1.0, -ring_height)
+        cylinder = self.create_notch(cylinder, outside_radius, notch_height, 290, 2.0, 1.0, -ring_height)
+
+        ring_height = outside_radius - inside_radius
+        notch_height = ring_height
+        half_torus = self.create_notch(half_torus, outside_radius, notch_height,  70, 2.0, 1.0, -ring_height)
+        half_torus = self.create_notch(half_torus, outside_radius, notch_height, 115, 2.0, 1.0, -ring_height)
+        half_torus = self.create_notch(half_torus, outside_radius, notch_height, 245, 2.0, 1.0, -ring_height)
+        half_torus = self.create_notch(half_torus, outside_radius, notch_height, 290, 2.0, 1.0, -ring_height)
+
+        shape = cylinder + half_torus
 
         landmarks = {
             1: (0, 0, 0), # Center Bottom
@@ -57,7 +75,7 @@ class N5Connector:
             
         return shape
 
-    def create_notch(self, mesh, mesh_outside_radius, mesh_height, notch_angle, notch_width, notch_depth):
+    def create_notch(self, mesh, mesh_outside_radius, mesh_height, notch_angle, notch_width, notch_depth, offset=0.0):
         
         # Adjust for the coordinate system with clockwise rotation
         notch_angle = - notch_angle + 90
@@ -90,9 +108,30 @@ class N5Connector:
         notch_polygon = pv.PolyData(notch_points).delaunay_2d()
 
         # Extrude to create the 3D notch shape
-        notch_box = notch_polygon.extrude((0, 0, mesh_height+2), capping=True).triangulate()
+        notch_box = notch_polygon.extrude((0, 0, mesh_height+2), capping=True).extract_surface().triangulate().clean(tolerance=1e-6)
+        notch_box = notch_box.translate((0, 0, offset))
 
         # Cut the notch from the outer cylinder
-        mesh = mesh.boolean_difference(notch_box)
+        mesh = mesh.extract_surface().triangulate().clean(tolerance=1e-6)
+
+        fix = MeshFix(mesh)
+        fix.repair()
+        mesh = pv.wrap(fix.mesh)
+
+        fix = MeshFix(notch_box)
+        fix.repair(joincomp=True)
+        notch_box = pv.wrap(fix.mesh)
+
+        # Perform boolean difference using VTK
+        boolean_filter = vtkBooleanOperationPolyDataFilter()
+        boolean_filter.SetOperationToDifference()
+        boolean_filter.SetInputData(0, mesh)
+        boolean_filter.SetInputData(1, notch_box)
+        boolean_filter.Update()
+
+        # Wrap the result back into PyVista and clean up
+        mesh = pv.wrap(boolean_filter.GetOutput()).triangulate().clean(tolerance=1e-6)
+
 
         return mesh
+    

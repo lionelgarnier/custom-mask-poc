@@ -62,8 +62,8 @@ def select_mesh_file(default_folder=None):
         return input("Enter the path to the 3D mesh file: ")
 
 def load_model(model_name):
-    module_name = f"models.{model_name}_model"
-    class_name = f"{model_name.capitalize()}Model"
+    module_name = f"models.{model_name.lower()}_model"
+    class_name = f"{model_name}Model"
     module = importlib.import_module(module_name)
     model_class = getattr(module, class_name)
     return model_class()

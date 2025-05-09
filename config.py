@@ -32,4 +32,4 @@ DEFAULT_PRINTING_SETTINGS = {
 }
 
 # Default 3D model for creating printable objects
-DEFAULT_MODEL = "mold"  # Options: "extrusion", "mold"
+DEFAULT_MODEL = "roundednose"  # Options: "roundedmouth", "roundednose", "moldnose"
