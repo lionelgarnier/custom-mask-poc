@@ -14,7 +14,7 @@ import tempfile
 import os
 import trimesh
 from functools import singledispatch
-from scipy.spatial import Delaunay
+from scipy.spatial import (Delaunay, ConvexHull)
 
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
@@ -204,7 +204,7 @@ def translate_mesh_mr(mesh: mr.Mesh, translation_vector) -> mr.Mesh:
     mesh.invalidateCaches()
     return mesh
 
-def thicken_mesh_vtk(surface: pv.PolyData, thickness: float) -> pv.PolyData:
+def thicken_mesh_vtk(surface: pv.PolyData, thickness: float, reverse: bool = False) -> pv.PolyData:
     """
     Thickens a surface by extruding each point along its normal, and builds volumetric cells.
     This version accepts surfaces with either triangular or quadrilateral faces.
@@ -219,6 +219,8 @@ def thicken_mesh_vtk(surface: pv.PolyData, thickness: float) -> pv.PolyData:
         The input surface mesh (with faces as triangles or quads).
     thickness : float
         The extrusion distance (along the per-vertex normals).
+    reverse : bool, optional
+        If True, thickens in the opposite direction of the normals.
     
     Returns
     -------
@@ -232,6 +234,10 @@ def thicken_mesh_vtk(surface: pv.PolyData, thickness: float) -> pv.PolyData:
     points = surface.points
     normals = surface.point_data["Normals"]
     n_pts = points.shape[0]
+    
+    # Reverse normals if needed
+    if reverse:
+        normals = -normals
     
     # Parse the flat face array into a list of cells.
     # In PyVista, surface.faces is a flat array: [n0, i0, i1, ..., n1, j0, j1, ...]
@@ -533,7 +539,7 @@ def unique_points(line_points_3d) -> np.ndarray:
     return np.array(unique_points)
 
 
-def get_surface_within_area(mesh: pv.PolyData, line_points_3d, line_hole_3d = None) -> pv.PolyData:
+def get_surface_within_area(mesh: pv.PolyData, line_points_3d) -> pv.PolyData:
     #TODO: extrude in normal direction instead of Z
     # vector = compute_normals(mesh)
     try:
@@ -559,13 +565,14 @@ def get_surface_within_area(mesh: pv.PolyData, line_points_3d, line_hole_3d = No
         # Select the part of the face mesh inside the extrusion
         surface = mesh.clip_surface(extrusion,invert=False)
 
+
         return surface, ""
     
     except Exception as e:
         return None, f"Error in get_surface_within_area: {e}"
 
 
-def remove_surface_within_area(mesh, line_points_3d):
+def remove_surface_within_area(mesh, line_points_3d, ):
     """
     Remove from mesh any region enclosed by line_points_3d.
     """
@@ -758,7 +765,7 @@ def get_landmark(landmarks, landmark_ids=None, target_id=None):
 
 def clean_and_smooth(mesh, smooth_iter=50, clean_tol=1e-3):
     # Remove small isolated components
-    # mesh = mesh.connectivity(largest=True)
+    # mesh = mesh.connectivity(extraction_mode='largest')
     
     # Clean and remove degenerate features
     mesh = mesh.clean(tolerance=clean_tol)
@@ -768,91 +775,51 @@ def clean_and_smooth(mesh, smooth_iter=50, clean_tol=1e-3):
 
     return mesh
 
-def loft_between_line_points(source_points1, source_points2, resolution=50):
+def loft_between_line_points(source_points1, source_points2, close = True):
     if len(source_points1) != len(source_points2):
         raise ValueError("Both curves must have the same number of points.")
+    
+    if close:
+        source_points1 = np.vstack([source_points1, source_points1[0]])
+        source_points2 = np.vstack([source_points2, source_points2[0]])
 
     num_points = len(source_points1)
-
-    # Create vtkPoints and insert all points sequentially (curve1 then curve2)
+    
+    # Create vtkPoints and insert all points
     points = vtk.vtkPoints()
     for pt in source_points1:
         points.InsertNextPoint(pt)
     for pt in source_points2:
         points.InsertNextPoint(pt)
 
-    # Create two separate lines explicitly
-    lines = vtk.vtkCellArray()
-
-    # First polyline (curve 1)
-    line1 = vtk.vtkPolyLine()
-    line1.GetPointIds().SetNumberOfIds(num_points)
-    for i in range(num_points):
-        line1.GetPointIds().SetId(i, i)
-    lines.InsertNextCell(line1)
-
-    # Second polyline (curve 2)
-    line2 = vtk.vtkPolyLine()
-    line2.GetPointIds().SetNumberOfIds(num_points)
-    for i in range(num_points):
-        line2.GetPointIds().SetId(i, num_points + i)
-    lines.InsertNextCell(line2)
-
-    # Prepare input polydata
-    input_polydata = vtk.vtkPolyData()
-    input_polydata.SetPoints(points)
-    input_polydata.SetLines(lines)
-
-    # Create ruled surface filter and set parameters
-    ruled_surface = vtk.vtkRuledSurfaceFilter()
-    ruled_surface.SetInputData(input_polydata)
-    ruled_surface.SetResolution(resolution, resolution)
-    ruled_surface.SetRuledModeToResample()
-    ruled_surface.CloseSurfaceOff()  # avoid closing to make it open
-    ruled_surface.PassLinesOn()
-    ruled_surface.OrientLoopsOn()
-    ruled_surface.Update()
-
+    # Create quad cells explicitly connecting corresponding points
+    quads = vtk.vtkCellArray()
+    for i in range(num_points-1):
+        quad = vtk.vtkQuad()
+        quad.GetPointIds().SetId(0, i)                  # current point in line 1
+        quad.GetPointIds().SetId(1, i+1)                # next point in line 1
+        quad.GetPointIds().SetId(2, num_points + i+1)   # next point in line 2
+        quad.GetPointIds().SetId(3, num_points + i)     # current point in line 2
+        quads.InsertNextCell(quad)
+    
+    # Create polydata with explicit quad connectivity
+    polydata = vtk.vtkPolyData()
+    polydata.SetPoints(points)
+    polydata.SetPolys(quads)
+    
     # Return PyVista mesh
-    return pv.wrap(ruled_surface.GetOutput())
+    return pv.wrap(polydata)
 
 
 
 
-def extrude_half_tube_on_face_along_line(line_points: np.ndarray,
+def extrude_tube_on_face_along_line(line_points: np.ndarray,
                                            face_normals: np.ndarray,
                                            radius: float,
-                                           n_cs_points: int = 20) -> (pv.PolyData, np.ndarray, np.ndarray, np.ndarray):
-    """
-    Create a half-tubular surface that lays on a face by lofting half-circular cross-sections along a centerline.
-    The cross-section is oriented so that its flat edge (chord) is tangent to the centerline and the curved portion
-    extends outward according to the face normals. The "top" of the half circle is stored in top_points.
-    
-    If the centerline is closed (first point equals the last point within tolerance), the lateral surface
-    is wrapped (first and last cross-sections are connected) so that no end cap is created.
-    
-    Parameters
-    ----------
-    line_points : np.ndarray
-        An (N,3) array representing the centerline of the tube.
-    face_normals : np.ndarray
-        An (N,3) array representing the face normal at each centerline point.
-    radius : float
-        The tube radius (thickness).
-    n_cs_points : int, optional
-        Number of points to sample the half cross-section (default 20).
-    
-    Returns
-    -------
-    pv.PolyData
-        A PyVista PolyData object representing the lofted half-tubular surface.
-    np.ndarray
-        An (N,3) array of the "top" points of each cross-section.
-    np.ndarray
-        An (n_cs_points,3) array of points in the first cross-section.
-    np.ndarray
-        An (n_cs_points,3) array of points in the last cross-section.
-    """
+                                           n_cs_points: int = 20,
+                                           y_ratio: float = 1.0) :
+
+
     N = line_points.shape[0]
     if face_normals.shape[0] != N:
         raise ValueError("line_points and face_normals must have the same number of points.")
@@ -861,9 +828,9 @@ def extrude_half_tube_on_face_along_line(line_points: np.ndarray,
     # Using theta in [0, π/2] produces a half circle.
     # (For a full half tube, you might use the range [0, π], but here we assume
     # that the half cross-section is defined over [0, π/2] for your specific case.)
-    angles = np.linspace(0, np.pi/2, n_cs_points)
+    angles = np.linspace(0, np.pi*2, n_cs_points)
     local_cs = np.column_stack((radius * np.cos(angles),
-                                radius * np.sin(angles)))  # shape: (n_cs_points, 2)
+                                radius * np.sin(angles) * y_ratio))  # shape: (n_cs_points, 2)
         
     # Check if the centerline is closed (first and last points coincide within a tolerance)
     closed_loop = np.allclose(line_points[0], line_points[-1], atol=1e-6)
@@ -928,7 +895,8 @@ def extrude_half_tube_on_face_along_line(line_points: np.ndarray,
         cross_sections.append(cs_global)
                 
         # The "top" of the half circle corresponds to local coordinates (0, radius) (theta = π/2).
-        top_point = p - radius * U + 0 * U + radius * V
+        angle = 7 * np.pi / 4
+        top_point = (p - radius * U) + radius * V * np.sin(angle) * y_ratio + radius * U * np.cos(angle)
         top_points_list.append(top_point)
     
     # Assemble all cross-section points into a single vtkPoints object.
@@ -981,7 +949,7 @@ def extrude_half_tube_on_face_along_line(line_points: np.ndarray,
     # Convert the resulting vtkPolyData to a PyVista PolyData object.
     pv_polydata = pv.wrap(polydata)
     
-    return pv_polydata, top_points, first_cs, last_cs
+    return pv_polydata, top_points, cross_sections
 
 def reorder_line_points(line_points: np.ndarray, pt: np.ndarray) -> np.ndarray:
     """
@@ -1074,3 +1042,110 @@ def deform_surface_at_point(surface, center_point, radius, strength, inside_dire
     points[mask] += displacement
     
     return deformed
+
+
+def extract_line_from_landmarks(mesh, landmarks, landmark_indices, contour_landmark_ids):
+    """
+    Extract face contour line from landmarks and project it onto the face mesh.
+    """
+    valid_ids = [np.where(landmark_indices == lid)[0][0] 
+                 for lid in contour_landmark_ids if lid in landmark_indices]
+    
+    closed = contour_landmark_ids[0] == contour_landmark_ids[-1]
+    line_points = landmarks[valid_ids]
+    line_points = smooth_line_points(line_points, smoothing=0.05, num_samples=70, closed=closed)   
+    
+    # if hasattr(mesh, 'compute_triangle_normals'):
+    #     mesh.compute_triangle_normals()
+
+    if "Normals" not in mesh.point_data:
+        mesh = mesh.compute_normals()
+
+
+    bounds = mesh.bounds
+    dz = 100
+    projected_line_points = []
+    projected_normals = []
+    for pt in line_points:
+        origin = (pt[0], pt[1], bounds[5] + dz)
+        end = (pt[0], pt[1], bounds[4] - dz)
+        pts, ids = mesh.ray_trace(origin, end, first_point=True)
+        if pts.size:
+            projected_line_points.append(pts)
+            
+            idx = mesh.find_closest_point(pt)
+            n = mesh.point_data["Normals"][idx]
+            n = n / np.linalg.norm(n)
+            projected_normals.append(n)
+        else:
+            projected_line_points.append(pt)
+            projected_normals.append(np.array([0.0, 0.0, 1.0]))  # Default normal
+    
+    return np.array(projected_line_points), np.array(projected_normals)
+    # return np.array(projected_line_points)
+
+def get_tangent_points(cross_sections, circle_points):
+    
+    tangent_points = []
+    p0 = np.mean(circle_points, axis=0)
+
+    # loop over each section
+    for cnt, cross_section_points in enumerate(cross_sections, start = 0):
+        connector_point = circle_points[cnt]
+        
+        outside_vec = connector_point - p0
+        outside_vec /= np.linalg.norm(outside_vec)
+        
+        
+        # Create convex hull from intersection points
+        hull = ConvexHull(cross_section_points)
+        hull_points = cross_section_points[hull.vertices]
+
+        # Define the normal vector to the plane defined by cross_section_points
+        plane_normal = np.cross(cross_section_points[1] - cross_section_points[0], 
+                                    cross_section_points[2] - cross_section_points[0])
+        plane_normal /= np.linalg.norm(plane_normal)
+
+        # Find tangent points
+        tangent_candidates = []
+
+        for i, hull_point in enumerate(hull_points):
+            # Vector from point to hull point
+            vec_to_hull = hull_point - connector_point
+            
+            # Create a normal vector to this line in the plane
+            tangent_normal = np.cross(vec_to_hull, plane_normal)
+            tangent_normal /= np.linalg.norm(tangent_normal)
+            
+            # Check if all other hull points are on one side of this line
+            is_tangent = True
+            sign = None
+            
+            for j, other_hull_point in enumerate(hull_points):
+                if j != i:
+                    # Vector from hull_point to other_hull_point
+                    vec_along_hull = other_hull_point - hull_point
+                    
+                    # Dot product with normal tells us which side it's on
+                    side = np.dot(tangent_normal, vec_along_hull)
+                    
+                    if sign is None:
+                        sign = np.sign(side)
+                    elif side * sign < 0:  # Points on different sides
+                        is_tangent = False
+                        break
+            
+            if is_tangent:
+                tangent_candidates.append(hull_point)
+
+        # Choose the tangent point that is the farthest from the circle center (p0)
+        if tangent_candidates:
+            tangent_point = max(
+                tangent_candidates, 
+                key=lambda p: np.linalg.norm((p - p0)[:2])  # Consider projection on x, y plane
+            )
+
+
+            tangent_points.append(tangent_point)
+
+    return tangent_points

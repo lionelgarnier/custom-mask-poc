@@ -5,21 +5,21 @@ from utils import (create_pyvista_mesh, thicken_mesh, clean_and_smooth, thicken_
                    get_surface_within_area, remove_surface_within_area, deform_surface_at_point,
                   compute_rotation_between_vectors, extrude_mesh, reorder_line_points, 
                   rotate_shape_and_landmarks, translate_shape_and_landmarks,
-                  get_landmark, loft_between_line_points, extrude_half_tube_on_face_along_line)
+                  get_landmark, loft_between_line_points, extrude_tube_on_face_along_line,
+                  extract_line_from_landmarks)
 from shapes.n5_connector import N5Connector
 from shapes.fsa_connector import FSAConnector
-from face import extract_line_from_landmarks
 from scipy.spatial.transform import Rotation as R
 
 
-class MoldModel(Face3DObjectModel):    
+class MoldNoseModel(Face3DObjectModel):    
     def create_3d_object(self, output_path, **kwargs):
         
         # Get required parameters
         face_mesh = kwargs.get('face_mesh', None)
         face_landmarks = np.array(kwargs.get('face_landmarks'))
         face_landmarks_ids = np.array(kwargs.get('face_landmarks_ids'))
-        thickness = 1.0
+
         
         if face_mesh is None:
             raise ValueError("face_mesh is required for MoldModel")
@@ -57,7 +57,7 @@ class MoldModel(Face3DObjectModel):
 
         try:        
             face_mesh = create_pyvista_mesh(face_mesh)
-            face_mesh = face_mesh.connectivity(largest=True)
+            face_mesh = face_mesh.connectivity(extraction_mode='largest')
 
             
             # Extract the nose surface and the hole surface
@@ -65,7 +65,7 @@ class MoldModel(Face3DObjectModel):
             shape_hole_points_3d, _ = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_hole_landmarks) 
             shape_strong_points_3d, _ = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_strong_landmarks) 
             shape_support_points_3d, _ = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_support_landmarks) 
-            shape_tube_points_3d, shape_tube_normals = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_tube_landmarks) 
+            # shape_tube_points_3d, shape_tube_normals = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_tube_landmarks) 
             
             # Generate the surfaces using the extracted function
             nose_surface, _ = get_surface_within_area(face_mesh, shape_points_3d)
@@ -98,23 +98,23 @@ class MoldModel(Face3DObjectModel):
             # nose_strong_surface, _ = get_surface_within_area(face_mesh, shape_strong_points_3d)
             # nose_strong_volume_mesh = thicken_mesh_vtk(nose_strong_surface, 3.0)
 
-            # Create a flexible volume to interface around the mouth
-            tube_surface, tube_top_points, shape_tube_start_section, shape_tube_end_section = extrude_half_tube_on_face_along_line(shape_tube_points_3d, shape_tube_normals, 5.0)
-            # Interface at volume start
-            pt = get_landmark(face_landmarks, face_landmarks_ids, 371)
-            landmark_array = np.tile(pt, (shape_tube_start_section.shape[0], 1))
-            shape_tube_start_surface = loft_between_line_points(shape_tube_start_section, landmark_array)
-            # Interface at volume end
-            pt = get_landmark(face_landmarks, face_landmarks_ids, 142)
-            landmark_array = np.tile(pt, (shape_tube_end_section.shape[0], 1))
-            shape_tube_end_surface = loft_between_line_points(shape_tube_end_section, landmark_array)
+            # # Create a flexible volume to interface around the mouth
+            # tube_surface, tube_top_points, shape_tube_start_section, shape_tube_end_section = extrude_tube_on_face_along_line(shape_tube_points_3d, shape_tube_normals, 5.0)
+            # # Interface at volume start
+            # pt = get_landmark(face_landmarks, face_landmarks_ids, 371)
+            # landmark_array = np.tile(pt, (shape_tube_start_section.shape[0], 1))
+            # shape_tube_start_surface = loft_between_line_points(shape_tube_start_section, landmark_array)
+            # # Interface at volume end
+            # pt = get_landmark(face_landmarks, face_landmarks_ids, 142)
+            # landmark_array = np.tile(pt, (shape_tube_end_section.shape[0], 1))
+            # shape_tube_end_surface = loft_between_line_points(shape_tube_end_section, landmark_array)
             
-            tube_surface = tube_surface + shape_tube_start_surface + shape_tube_end_surface
-            tube_volume = thicken_mesh_vtk(tube_surface, 1.5)
+            # tube_surface = tube_surface + shape_tube_start_surface + shape_tube_end_surface
+            # tube_volume = thicken_mesh_vtk(tube_surface, 1.5)
 
-            # Create a continuous line with points from shape_support_points_3d and tube_top_points
-            join_contact_line_points = np.vstack([shape_support_points_3d, tube_top_points])
-            join_contact_line_points = np.vstack([join_contact_line_points, join_contact_line_points[0]])
+            # # Create a continuous line with points from shape_support_points_3d and tube_top_points
+            # join_contact_line_points = np.vstack([shape_support_points_3d, tube_top_points])
+            # join_contact_line_points = np.vstack([join_contact_line_points, join_contact_line_points[0]])
 
 
             join_contact_line_points = shape_support_points_3d

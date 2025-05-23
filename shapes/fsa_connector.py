@@ -5,7 +5,7 @@ class FSAConnector:
     def create_3d_object(self, output_path=None, **kwargs):
         # Tube parameters
         height_mm = 7.0
-        outside_radius = 44.0 / 2.0
+        outside_radius = 42.0 / 2.0
         inside_radius = 36.0 / 2.0
         
         # Create the outer cylinder

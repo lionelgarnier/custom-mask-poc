@@ -283,42 +283,172 @@ def extract_landmarks_from_view(mesh, width=800, height=800):
 
     return valid_points_3d, valid_indices
 
-def extract_line_from_landmarks(mesh, landmarks, landmark_indices, contour_landmark_ids=DEFAULT_FACE_CONTOUR_LANDMARKS):
+def extract_average_face_landmarks_from_video(video_path, max_frames=None, debug=False):
     """
-    Extract face contour line from landmarks and project it onto the face mesh.
+    Extract 3D face landmarks from video frames, align each to frontal view, and compute the average landmarks in normalized space.
+
+    debug: when True, visualize and log raw vs aligned landmarks for the first processed frame.
     """
-    valid_ids = [np.where(landmark_indices == lid)[0][0] 
-                 for lid in contour_landmark_ids if lid in landmark_indices]
-    
-    closed = contour_landmark_ids[0] == contour_landmark_ids[-1]
-    line_points = landmarks[valid_ids]
-    line_points = smooth_line_points(line_points, smoothing=0.05, num_samples=100, closed=closed)   
-    
-    # if hasattr(mesh, 'compute_triangle_normals'):
-    #     mesh.compute_triangle_normals()
+    reference = None
+    mp_face_mesh = mp.solutions.face_mesh.FaceMesh
+    cap = cv2.VideoCapture(video_path)
+    aligned_landmarks = []
+    frame_idx = 0
+    debug_count = 0
 
-    if "Normals" not in mesh.point_data:
-        mesh = mesh.compute_normals()
+    with mp.solutions.face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=1,
+        refine_landmarks=True
+    ) as face_mesh:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if max_frames is not None and frame_idx >= max_frames:
+                break
+            frame_idx += 1
 
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = face_mesh.process(rgb)
+            if not results.multi_face_landmarks:
+                continue
 
-    bounds = mesh.bounds
-    dz = 100
-    projected_line_points = []
-    projected_normals = []
-    for pt in line_points:
-        origin = (pt[0], pt[1], bounds[5] + dz)
-        end = (pt[0], pt[1], bounds[4] - dz)
-        pts, ids = mesh.ray_trace(origin, end, first_point=True)
-        if pts.size:
-            projected_line_points.append(pts)
-            
-            idx = mesh.find_closest_point(pt)
-            n = mesh.point_data["Normals"][idx]
-            n = n / np.linalg.norm(n)
-            projected_normals.append(n)
-        else:
-            projected_line_points.append(pt)
-            projected_normals.append(np.array([0.0, 0.0, 1.0]))  # Default normal
-    
-    return np.array(projected_line_points), np.array(projected_normals)
-    # return np.array(projected_line_points)
+            lm = results.multi_face_landmarks[0].landmark
+            points = np.array([[p.x, p.y, p.z] for p in lm], dtype=np.float64)
+
+            if debug and frame_idx == 1:
+                # log raw Z range
+                print(f"Debug: raw z min={points[:,2].min():.4f}, max={points[:,2].max():.4f}")
+                # visualize raw
+                from visualization import visualize_3d_landmarks
+                import matplotlib.pyplot as plt
+                fig_raw = visualize_3d_landmarks(points, title="Raw normalized landmarks (frame 1)")
+                plt.show()
+
+            try:
+                nose_top = points[1]
+                nose_bottom = points[2]
+                rot1 = compute_rotation_between_vectors(nose_bottom - nose_top, np.array([0.0, 0.0, 1.0]))
+                pts1 = rotate_landmarks(points, rot1)
+
+                left_eye = pts1[33]
+                right_eye = pts1[263]
+                eye_vec = right_eye - left_eye
+                eye_vec_xz = np.array([eye_vec[0], 0.0, eye_vec[2]])
+                rot2 = compute_rotation_between_vectors(eye_vec_xz, np.array([1.0, 0.0, 0.0]))
+                aligned = rotate_landmarks(pts1, rot2)
+                # Normalize: center all landmarks at the nose top (index 1) to preserve depth structure
+                nose_ref = aligned[1].copy()
+                aligned = aligned - nose_ref
+
+                # For robust averaging, align each frame to first frame via rigid_transform
+                if reference is None:
+                    reference = aligned.copy()
+                else:
+                    aligned = rigid_transform(aligned, reference)
+
+                if debug and frame_idx == 1:
+                    print(f"Debug: aligned z min={aligned[:,2].min():.4f}, max={aligned[:,2].max():.4f}")
+                    fig_aligned = visualize_3d_landmarks(aligned, title="Aligned landmarks (frame 1)")
+                    plt.show()
+
+                aligned_landmarks.append(aligned)
+                # per-frame debug: print z-range for first few frames
+                if debug and debug_count < 5:
+                    print(f"Debug frame {frame_idx}: aligned z min={aligned[:,2].min():.4f}, max={aligned[:,2].max():.4f}")
+                    debug_count += 1
+            except Exception as e:
+                if debug:
+                    print(f"Debug: alignment error on frame 1: {e}")
+                continue
+
+    cap.release()
+    if not aligned_landmarks:
+        raise ValueError("No face landmarks extracted from video.")
+
+    # average across frames
+    stack = np.stack(aligned_landmarks, axis=0)
+    avg_landmarks = np.mean(stack, axis=0)
+
+    # Debug info for averaged landmarks
+    if debug:
+        n = stack.shape[0]
+        print(f"Debug: averaged over {n} frames, avg z min={avg_landmarks[:,2].min():.4f}, max={avg_landmarks[:,2].max():.4f}")
+        from visualization import visualize_3d_landmarks
+        import matplotlib.pyplot as plt
+        fig_avg = visualize_3d_landmarks(avg_landmarks, title="Average Landmarks Cloud")
+        plt.show()
+    return avg_landmarks
+
+def rigid_transform(A, B):
+    """
+    Compute rigid transform (rotation + translation) that aligns point set A to B.
+    A, B: (N,3) arrays
+    Returns A_transformed: (N,3)
+    """
+    assert A.shape == B.shape
+    centroid_A = np.mean(A, axis=0)
+    centroid_B = np.mean(B, axis=0)
+    AA = A - centroid_A
+    BB = B - centroid_B
+    H = AA.T @ BB
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    # ensure right-handed coordinate system
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    t = centroid_B - R @ centroid_A
+    return (R @ A.T).T + t
+
+def compute_rigid_transform_parameters(A, B):
+    """
+    Compute rotation matrix R and translation vector t that best align A to B.
+    A, B: (N,3) corresponding point sets.
+    Returns:
+      R: (3,3), t: (3,)
+    """
+    assert A.shape == B.shape
+    centroid_A = np.mean(A, axis=0)
+    centroid_B = np.mean(B, axis=0)
+    AA = A - centroid_A
+    BB = B - centroid_B
+    H = AA.T @ BB
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    t = centroid_B - R @ centroid_A
+    return R, t
+
+def compute_similarity_transform_parameters(A, B):
+    """
+    Compute similarity transform (scale, rotation, translation) that aligns A to B.
+    A, B: (N,3) arrays of corresponding points.
+    Returns:
+      s: scale factor
+      R: (3,3) rotation matrix
+      t: (3,) translation vector
+    """
+    assert A.shape == B.shape
+    # centroids
+    centroid_A = np.mean(A, axis=0)
+    centroid_B = np.mean(B, axis=0)
+    AA = A - centroid_A
+    BB = B - centroid_B
+    # covariance
+    H = AA.T @ BB
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    # ensure right-handed
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    # scale
+    var_A = np.sum(np.square(AA))
+    s = np.sum(S) / var_A
+    # translation
+    t = centroid_B - s * (R @ centroid_A)
+    return s, R, t
