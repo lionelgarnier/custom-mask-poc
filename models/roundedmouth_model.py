@@ -1,6 +1,7 @@
 import numpy as np
 import pyvista as pv
 from models.base_model import Face3DObjectModel
+from shapes.f20_connector import F20Connector
 from utils import (create_pyvista_mesh, thicken_mesh, clean_and_smooth, thicken_mesh_vtk,
                    get_surface_within_area, remove_surface_within_area, deform_surface_at_point,
                   compute_rotation_between_vectors, extrude_mesh, reorder_line_points, 
@@ -45,7 +46,8 @@ class RoundedMouthModel(Face3DObjectModel):
         
         # Create an instance of N5Connector and generate the 3D object
         # shape_builder = N5Connector()
-        shape_builder = FSAConnector()
+        # shape_builder = FSAConnector()
+        shape_builder = F20Connector()
         connector = shape_builder.create_3d_object()
 
         # Locate face landmarks defining horizontal and vertical alignments (x= vertical, y=horizontal)
@@ -117,7 +119,7 @@ class RoundedMouthModel(Face3DObjectModel):
         y_vec = y_vec * (np.linalg.norm(y_vec) - 1.0) / np.linalg.norm(y_vec)
 
         # Move center 1mm down on z axis to ensure proper shape contact
-        center[2] -= 1.0
+        center[2] -= 3.0
         
         # Generate circle points with the same number of points as shape_points_3d
         num_points = len(shape_points_3d)-1
@@ -160,12 +162,13 @@ class RoundedMouthModel(Face3DObjectModel):
         # volume = tube_volume + tangent_volume + connector
 
         surface = tube_surface + tangent_surface 
-        volume = thicken_mesh_vtk(surface, 1.2)
+        volume = thicken_mesh_vtk(surface, 1)
 
-        strong_surface_volume = thicken_mesh_vtk(strong_surface, 1.2, True)
+        tube_surface_volume = thicken_mesh_vtk(tube_surface, 1.2, False)
+        tangent_surface_volume = thicken_mesh_vtk(tangent_surface, 1.5, True)
         
 
-        volume = volume + connector #+ strong_surface_volume
+        volume = volume + connector + tangent_surface_volume #+ tube_surface_volume
 
         volume = volume.extract_surface()
 

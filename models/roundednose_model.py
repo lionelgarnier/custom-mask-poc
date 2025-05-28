@@ -44,7 +44,7 @@ class RoundedNoseModel(Face3DObjectModel):
         
         # Tubular contact with face
         shape_points_3d, shape_normals = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_landmarks) 
-        tube_surface, tube_top_points, cross_sections = extrude_tube_on_face_along_line(shape_points_3d, shape_normals, 4.0)
+        tube_surface, tube_top_points, cross_sections = extrude_tube_on_face_along_line(shape_points_3d, shape_normals, 3.0)
         
         
         # Create an instance of N5Connector and generate the 3D object
@@ -148,7 +148,7 @@ class RoundedNoseModel(Face3DObjectModel):
         # volume = tube_volume + tangent_volume + connector
 
         surface = tube_surface + tangent_surface
-        volume = thicken_mesh_vtk(surface, 1.5)
+        volume = thicken_mesh_vtk(surface, 1.3)
         # tangent_volume = thicken_mesh_vtk(tangent_surface, 1.5)
 
         volume = volume + connector #+ tangent_volume
