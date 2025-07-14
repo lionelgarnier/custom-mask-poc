@@ -15,6 +15,8 @@ import os
 import trimesh
 from functools import singledispatch
 from scipy.spatial import (Delaunay, ConvexHull)
+import manifold3d
+from scipy.interpolate import interp1d
 
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
@@ -1149,3 +1151,121 @@ def get_tangent_points(cross_sections, circle_points):
             tangent_points.append(tangent_point)
 
     return tangent_points
+
+def repair_mesh(pv_mesh: pv.PolyData) -> pv.PolyData:
+    # Convert PyVista to Trimesh
+    tm_mesh = trimesh.Trimesh(vertices=pv_mesh.points, faces=pv_mesh.faces.reshape(-1, 4)[:, 1:])
+    
+    # Repair: fix watertight, remove degenerate
+    tm_mesh.fill_holes()
+    tm_mesh.remove_degenerate_faces()
+    tm_mesh.fix_normals()
+    tm_mesh.merge_vertices()
+    
+    # Convert back to PyVista
+    faces = np.hstack([np.full((len(tm_mesh.faces), 1), 3), tm_mesh.faces]).flatten()
+    return pv.PolyData(tm_mesh.vertices, faces)
+
+def validate_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    if mesh.is_watertight:
+        return mesh
+    mesh.fill_holes()
+    mesh.fix_normals()
+    mesh.merge_vertices()
+    if not mesh.is_watertight:
+        print("Warning: Mesh still not watertight after repair.")
+    return mesh
+
+def segment_face_region(mesh, landmarks, buffer=10):
+    if isinstance(mesh, pv.PolyData):
+        tm_mesh = trimesh.Trimesh(vertices=mesh.points, faces=mesh.faces.reshape(-1, 4)[:, 1:])
+    else:
+        tm_mesh = mesh  # Assume Trimesh
+    
+    # Convex hull of landmarks
+    hull = ConvexHull(landmarks)
+    hull_mesh = trimesh.Trimesh(vertices=landmarks, faces=hull.simplices)
+    
+    # Expand hull by buffer (offset)
+    expanded_hull = hull_mesh.buffer(buffer)
+    
+    # Intersect with original mesh
+    cropped = tm_mesh.intersection(expanded_hull, engine='blender')  # Use robust engine
+    
+    # Convert back to PyVista if needed
+    faces = np.hstack([np.full((len(cropped.faces), 1), 3), cropped.faces]).flatten()
+    return pv.PolyData(cropped.vertices, faces)
+
+def thicken_parametric(surface: trimesh.Trimesh, thickness_map: dict) -> trimesh.Trimesh:
+    """Create a thickened version of the surface using trimesh extrusion"""
+    if not thickness_map:
+        thickness = 2.0
+    else:
+        thickness = np.mean(list(thickness_map.values()))
+    
+    try:
+        # Use trimesh's built-in extrusion method
+        # First, ensure we have face normals
+        surface.fix_normals()
+        
+        # Create bottom vertices (original surface)
+        bottom_vertices = surface.vertices.copy()
+        
+        # Create top vertices (extruded along vertex normals)
+        top_vertices = surface.vertices + surface.vertex_normals * thickness
+        
+        # Combine all vertices
+        all_vertices = np.vstack([bottom_vertices, top_vertices])
+        
+        # Create bottom faces (reversed winding for inside-facing)
+        n_vertices = len(surface.vertices)
+        bottom_faces = surface.faces[:, ::-1]  # Reverse winding
+        
+        # Create top faces (same winding as original for outside-facing)  
+        top_faces = surface.faces + n_vertices
+        
+        # Create side faces connecting edges
+        side_faces = []
+        for edge in surface.edges:
+            v0, v1 = edge
+            # Create quad as two triangles
+            # First triangle: bottom_v0, bottom_v1, top_v1
+            side_faces.append([v0, v1, v1 + n_vertices])
+            # Second triangle: bottom_v0, top_v1, top_v0  
+            side_faces.append([v0, v1 + n_vertices, v0 + n_vertices])
+        
+        # Combine all faces
+        all_faces = np.vstack([bottom_faces, top_faces, np.array(side_faces)])
+        
+        # Create the solid mesh
+        thickened_mesh = trimesh.Trimesh(vertices=all_vertices, faces=all_faces)
+        
+        # Clean up the mesh
+        thickened_mesh.remove_duplicate_faces()
+        thickened_mesh.remove_degenerate_faces()
+        thickened_mesh.fix_normals()
+        
+        return thickened_mesh
+        
+    except Exception as e:
+        print(f"Error in thicken_parametric: {e}")
+        # Fallback: return original surface
+        return surface
+
+def csg_union(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
+    if not meshes:
+        return trimesh.Trimesh()
+    manifold_meshes = [manifold3d.Manifold(m) for m in meshes]
+    result = manifold_meshes[0]
+    for m in manifold_meshes[1:]:
+        result = result.boolean_union(m)
+    return result.to_trimesh()  # Assume conversion method
+
+def csg_difference(base: trimesh.Trimesh, subtract: trimesh.Trimesh) -> trimesh.Trimesh:
+    m_base = manifold3d.Manifold(base)
+    m_sub = manifold3d.Manifold(subtract)
+    return m_base.boolean_difference(m_sub).to_trimesh()
+
+def export_stl(mesh: trimesh.Trimesh, path: str):
+    mesh = validate_mesh(mesh)
+    mesh.export(path, file_type='stl')

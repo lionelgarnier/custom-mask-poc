@@ -158,6 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Enable debug visualization for video landmark extraction")
     parser.add_argument("--feature-scale", action="store_true", help="Use eye-distance feature to compute landmark scaling")
     parser.add_argument("--axis-adjust", action="store_true", help="Adjust scaling per axis based on scan/video extents")
+    parser.add_argument("--mode", type=str, default="legacy", choices=["legacy", "parametric"], help="Model mode: legacy or parametric")
     args = parser.parse_args()
 
     # Video demo: compute and display average 3D landmarks
@@ -241,6 +242,11 @@ if __name__ == "__main__":
     mesh_path = args.path if args.path else select_mesh_file(file_settings['DEFAULT_MESH_FOLDER'])
 
     if mesh_path:
+        if args.mode == "parametric":
+            from models.parametric_nose_model import ParametricNoseModel  # Example
+            model = ParametricNoseModel()
+        else:
+            model = load_model(args.model)  # Existing
         process_face(mesh_path, 
                     args.model,
                     show_3d_print=vis_settings['SHOW_3D_PRINT'],

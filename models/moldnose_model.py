@@ -6,7 +6,7 @@ from utils import (create_pyvista_mesh, thicken_mesh, clean_and_smooth, thicken_
                   compute_rotation_between_vectors, extrude_mesh, reorder_line_points, 
                   rotate_shape_and_landmarks, translate_shape_and_landmarks,
                   get_landmark, loft_between_line_points, extrude_tube_on_face_along_line,
-                  extract_line_from_landmarks)
+                  extract_line_from_landmarks, repair_mesh)
 from shapes.n5_connector import N5Connector
 from shapes.fsa_connector import FSAConnector
 from scipy.spatial.transform import Rotation as R
@@ -277,6 +277,9 @@ class MoldNoseModel(Face3DObjectModel):
 
             # Convert UnstructuredGrid to PolyData by extracting the surface
             combined_volume_mesh = combined_volume_mesh.extract_surface()
+
+            # Repair the mesh for printing
+            combined_volume_mesh = repair_mesh(combined_volume_mesh)
 
             # Clean the form
             # face_volume = extrude_mesh(face_mesh, 10, np.array([0, 0, -1]))

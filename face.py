@@ -9,6 +9,7 @@ from utils import create_pyvista_mesh, smooth_line_points, compute_rotation_betw
 from config import DEFAULT_FACE_CONTOUR_LANDMARKS
 import pyvista as pv
 import matplotlib.pyplot as plt
+from scipy.stats import zscore
 
 
 def extract_face_landmarks(mesh_path):
@@ -30,8 +31,11 @@ def extract_face_landmarks(mesh_path):
     valid_indices : np.ndarray
         Indices of the valid landmarks
     """
-    # Load 3D model and compute normals
-    mesh = o3d.io.read_triangle_mesh(mesh_path)
+    # Load mesh with format handling
+    if mesh_path.lower().endswith(('.ply', '.obj', '.stl')):
+        mesh = o3d.io.read_triangle_mesh(mesh_path)
+    else:
+        raise ValueError("Unsupported format. Use PLY/OBJ/STL.")
     mesh.compute_vertex_normals()
 
     # Align face mesh
@@ -91,7 +95,14 @@ def extract_face_landmarks(mesh_path):
     # plotter.enable_trackball_style()
     # plotter.show()
 
-    return aligned_mesh, landmarks_3d, valid_indices
+    # Clean landmarks: Filter outliers based on z-score
+    landmarks_3d = landmarks_3d  # From extraction
+    z_scores = zscore(landmarks_3d, axis=0)
+    mask = np.all(np.abs(z_scores) < 3, axis=1)  # Threshold 3 std devs
+    cleaned_landmarks = landmarks_3d[mask]
+    cleaned_indices = valid_indices[mask]
+    
+    return aligned_mesh, cleaned_landmarks, cleaned_indices
 
 
 def rotate_face(mesh, rotation_matrix, pivot = None):

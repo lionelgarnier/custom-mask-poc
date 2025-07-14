@@ -33,3 +33,7 @@ DEFAULT_PRINTING_SETTINGS = {
 
 # Default 3D model for creating printable objects
 DEFAULT_MODEL = "roundednose"  # Options: "roundedmouth", "roundednose", "moldnose"
+
+# Parametric model settings
+PARAM_THICKNESS_MAP = {'nose': 2.0, 'mouth': 1.5}
+PARAM_RADIUS_MAP = {0: 10, 0.5: 15, 1: 10}
