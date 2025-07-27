@@ -1,12 +1,13 @@
 import numpy as np
 import pyvista as pv
 from models.base_model import Face3DObjectModel
-from utils import (create_pyvista_mesh, thicken_mesh, clean_and_smooth, thicken_mesh_vtk,
-                   get_surface_within_area, remove_surface_within_area, deform_surface_at_point,
-                  compute_rotation_between_vectors, extrude_mesh, reorder_line_points, 
-                  rotate_shape_and_landmarks, translate_shape_and_landmarks,
+from utils import (create_pyvista_mesh, repair_mesh, clean_and_smooth, thicken_mesh_vtk,
+                   thicken_mesh_with_variable_thickness, thicken_combined_surface_with_zones, 
+                   fix_surface_normals_at_interface, remove_surface_within_area, deform_surface_at_point,
+                   compute_rotation_between_vectors, extrude_mesh, reorder_line_points, 
+                   rotate_shape_and_landmarks, translate_shape_and_landmarks,
                   get_landmark, loft_between_line_points, extrude_tube_on_face_along_line,
-                  extract_line_from_landmarks, get_tangent_points)
+                  extract_line_from_landmarks, get_tangent_points, advanced_smooth_mesh, smooth_line_points)
 from shapes.n5_connector import N5Connector
 
 class RoundedNoseModel(Face3DObjectModel):
@@ -15,16 +16,17 @@ class RoundedNoseModel(Face3DObjectModel):
         face_mesh = kwargs.get('face_mesh', None)
         face_landmarks = np.array(kwargs.get('face_landmarks'))
         face_landmarks_ids = np.array(kwargs.get('face_landmarks_ids'))
+        smooth_intensity = kwargs.get('smooth_intensity', 'light')  # Plus conservateur par défaut
 
         
         if face_mesh is None:
-            raise ValueError("face_mesh is required for Extrusuin Model")
+            raise ValueError("face_mesh is required for Extrusion Model")
         
         if face_landmarks is None:
-            raise ValueError("face_landmarks are required for Extrusuin Model")
+            raise ValueError("face_landmarks are required for Extrusion Model")
         
         if face_landmarks_ids is None:
-            raise ValueError("face_landmarks_ids are required for Extrusuin Model")
+            raise ValueError("face_landmarks_ids are required for Extrusion Model")
         
         face_mesh = create_pyvista_mesh(face_mesh)
         face_mesh = face_mesh.connectivity(extraction_mode='largest')
@@ -44,6 +46,7 @@ class RoundedNoseModel(Face3DObjectModel):
         
         # Tubular contact with face
         shape_points_3d, shape_normals = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_landmarks) 
+
         tube_surface, tube_top_points, cross_sections = extrude_tube_on_face_along_line(shape_points_3d, shape_normals, 3.0)
         
         
@@ -136,32 +139,60 @@ class RoundedNoseModel(Face3DObjectModel):
         merged_surface = loft_between_line_points(tube_top_points, tangent_points)
         tube_surface = tube_surface.clip_surface(merged_surface, invert=True)
 
-
-        # Airway contact with face
-        # air_points_3d, air_normals = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, air_landmarks) 
-        # air_surface, air_top_points, air_cross_sections = extrude_tube_on_face_along_line(air_points_3d, air_normals, 2.0)
-        # air_tangent_points = get_tangent_points(air_cross_sections, tangent_points)
-
+        # Thicken the surface with variable thickness
+        volume = thicken_combined_surface_with_zones(
+            tube_surface=tube_surface, 
+            tangent_surface=tangent_surface,
+            tube_thickness_start=2.0,        # Thickness of the tangent surface
+            tube_thickness_end=0.5,       # Thickness of the tube surface  
+            tube_top_points=tube_top_points, 
+            circle_points=circle_points
+        )
         
-        # tube_volume = thicken_mesh_vtk(tube_surface, 1.0)
-        # tangent_volume = thicken_mesh_vtk(tangent_surface, 1.5)
-        # volume = tube_volume + tangent_volume + connector
+            # Add the connector
+        volume = volume + connector
 
-        surface = tube_surface + tangent_surface
-        volume = thicken_mesh_vtk(surface, 1.3)
-        # tangent_volume = thicken_mesh_vtk(tangent_surface, 1.5)
-
-        volume = volume + connector #+ tangent_volume
-
+        # Extract surface and repair holes/gaps between volumes
         volume = volume.extract_surface()
+        
+        # Clean and merge nearby vertices to close small gaps
+        volume = volume.clean(tolerance=0.1)
+        
+        # Fill any remaining holes (especially at volume junctions)
+        # Use a larger hole_size to catch the connection gap
+        volume = volume.fill_holes(hole_size=5.0)
+        
+        # Final repair avec lissage conservateur pour ne pas dégrader la géométrie
+        volume = repair_mesh(volume, smooth_intensity="none")  # Pas de lissage agressif dans repair
+        
+        # Lissage final optionnel et léger pour réduire les facettes SEULEMENT si demandé
+        if smooth_intensity == "medium":
+            # Lissage équilibré
+            volume = advanced_smooth_mesh(volume, intensity="light")
+        elif smooth_intensity == "strong":
+            # Lissage plus fort mais encore conservateur
+            volume = advanced_smooth_mesh(volume, intensity="medium")
+        elif smooth_intensity == "very_strong":
+            # Lissage maximum mais encore contrôlé
+            volume = advanced_smooth_mesh(volume, intensity="strong")
+        # Si smooth_intensity == "none" ou "light", on ne fait rien d'autre
+
+        # surface = tube_surface + tangent_surface
+        # volume = thicken_mesh_vtk(surface, 2)
+        # tangent_volume = thicken_mesh_vtk(tangent_surface, 1.5)
+
+        # volume = volume + connector #+ tangent_volume
+
+        # volume = volume.extract_surface()
+        # volume = repair_mesh(volume)
 
         # Add the surface to the plotter for visualization
         # Optionally plot for debugging
-        plotter = pv.Plotter()
-        plotter.add_mesh(face_mesh, color='lightgrey', opacity=0.2, show_edges=True)
-        plotter.add_mesh(tube_surface, color='blue', opacity=0.4, show_edges=True)
-        plotter.add_mesh(tangent_surface, color='orange', opacity=0.4, show_edges=True)
-        plotter.add_mesh(connector, color='green', opacity=0.4, show_edges=True)
+        # plotter = pv.Plotter()
+        # plotter.add_mesh(face_mesh, color='lightgrey', opacity=0.2, show_edges=True)
+        # plotter.add_mesh(tube_surface, color='blue', opacity=0.4, show_edges=True)
+        # plotter.add_mesh(tangent_surface, color='orange', opacity=0.4, show_edges=True)
+        # plotter.add_mesh(connector, color='green', opacity=0.4, show_edges=True)
         # plotter.add_mesh(air_surface, color='red', opacity=0.3, show_edges=True)
         # plotter.add_mesh(merged_polydata, color='red', line_width=2)
         # plotter.add_mesh(join_surface, color='yellow', opacity=0.4, show_edges=True)
@@ -182,7 +213,7 @@ class RoundedNoseModel(Face3DObjectModel):
         #         render_points_as_spheres=True,
         #         shape_opacity=0.7
         #     )    
-        plotter.show()
+        # plotter.show()
 
 
         return volume, ""
