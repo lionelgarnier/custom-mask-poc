@@ -94,3 +94,139 @@ def visualize_contact_line(mesh, line_points, plotter=None):
         return plotter
     else:
         return None
+
+
+def show_face_with_landmarks_3d(face_mesh,
+                                face_landmarks,
+                                face_landmarks_ids=None,
+                                keep_ids=None,
+                                show_ids=True,
+                                window_title="Face Mesh with Landmarks"):
+    """
+    Open an interactive PyVista window showing the 3D face mesh and landmarks.
+
+    - Orbit/zoom enabled (trackball style)
+    - Optional landmark ID labels
+
+    Parameters:
+    -----------
+    face_mesh : Open3D TriangleMesh | pyvista.PolyData | dict
+        The 3D face mesh (any format supported by create_pyvista_mesh)
+    face_landmarks : np.ndarray (N,3)
+        3D landmark coordinates (filtered valid landmarks)
+    face_landmarks_ids : iterable[int] | None
+        Original landmark IDs corresponding to face_landmarks rows
+    keep_ids : iterable[int] | None
+        Subset of original landmark IDs to display (filter)
+    show_ids : bool
+        Whether to display labels next to points
+    window_title : str
+        Window title
+    """
+
+    plotter = pv.Plotter()
+    plotter.add_title(window_title)
+
+    pv_mesh = create_pyvista_mesh(face_mesh)
+    plotter.add_mesh(pv_mesh, color='white', opacity=0.5)
+
+    # Build point set (optionally filtered by keep_ids)
+    if keep_ids is not None and face_landmarks_ids is not None:
+        id_to_point = {int(i): p for i, p in zip(face_landmarks_ids, face_landmarks)}
+        pts = np.array([id_to_point[i] for i in keep_ids if i in id_to_point], dtype=float)
+        labels = [str(i) for i in keep_ids if i in id_to_point]
+    else:
+        pts = np.asarray(face_landmarks, dtype=float)
+        labels = [str(int(i)) for i in face_landmarks_ids] if (show_ids and face_landmarks_ids is not None) else None
+
+    labels_actor_holder = {"actor": None}
+
+    if pts.size:
+        plotter.add_points(pts, color='red', point_size=6, render_points_as_spheres=True)
+        if show_ids and labels is not None:
+            try:
+                actor = plotter.add_point_labels(pts, labels, font_size=12, text_color='red', shape_opacity=0.0)
+                labels_actor_holder["actor"] = actor
+            except Exception:
+                # Fallback: per-point (slower)
+                for p, lbl in zip(pts, labels):
+                    plotter.add_point_labels([p], [lbl], font_size=12, text_color='red', shape_opacity=0.0)
+
+    # Camera and interaction
+    set_front_view(plotter)
+    plotter.enable_trackball_style()
+    # Ensure perspective projection so dolly zoom behaves as expected
+    try:
+        plotter.camera.SetParallelProjection(False)
+    except Exception:
+        pass
+    # Request right-click to pan using interactor custom mapping
+    try:
+        if hasattr(plotter, 'iren') and plotter.iren is not None:
+            plotter.iren.enable_custom_trackball_style(
+                left_button='rotate',
+                right_button='pan',
+                middle_button='dolly',
+                shift_left_button='pan',
+                shift_right_button='rotate',
+                shift_middle_button='dolly'
+            )
+    except Exception:
+        pass
+    # Quick zoom helpers and robust wheel bindings
+    try:
+        plotter.add_key_event('z', lambda: plotter.enable_zoom_style())  # Drag to zoom mode
+        plotter.add_key_event('t', lambda: plotter.enable_trackball_style())  # Back to orbit mode
+        plotter.add_key_event('j', lambda: plotter.enable_joystick_style())  # Joystick mode
+        # Avoid '+'/'-' (often bound to point-size), use '[' and ']' instead
+        plotter.add_key_event(']', lambda: (plotter.camera.zoom(1.15), plotter.render()))  # Zoom in
+        plotter.add_key_event('[', lambda: (plotter.camera.zoom(0.87), plotter.render()))  # Zoom out
+        # Toggle landmark IDs visibility
+        def _toggle_labels():
+            actor = labels_actor_holder.get("actor")
+            if actor is not None:
+                vis = actor.GetVisibility()
+                if vis:
+                    actor.VisibilityOff()
+                else:
+                    actor.VisibilityOn()
+                plotter.render()
+        plotter.add_key_event('i', _toggle_labels)
+        # Mouse wheel fallback: force camera zoom on wheel events
+        def _on_wheel_forward(obj=None, evt=None):
+            try:
+                plotter.camera.zoom(1.1)
+                plotter.render()
+            except Exception:
+                pass
+        def _on_wheel_backward(obj=None, evt=None):
+            try:
+                plotter.camera.zoom(0.9)
+                plotter.render()
+            except Exception:
+                pass
+        if hasattr(plotter, 'iren') and plotter.iren is not None:
+            plotter.iren.add_observer('MouseWheelForwardEvent', _on_wheel_forward)
+            plotter.iren.add_observer('MouseWheelBackwardEvent', _on_wheel_backward)
+    except Exception:
+        pass
+    plotter.show_grid()
+    plotter.show()
+
+    return plotter
+
+
+def preview_face_landmarks_from_mesh_path(mesh_path,
+                                          keep_ids=None,
+                                          show_ids=False,
+                                          window_title="Face Mesh with Landmarks"):
+    """
+    Convenience helper: extract landmarks from a mesh path and display interactively.
+    """
+    mesh, landmarks, landmark_ids = extract_face_landmarks(mesh_path)
+    return show_face_with_landmarks_3d(mesh,
+                                       landmarks,
+                                       landmark_ids,
+                                       keep_ids=keep_ids,
+                                       show_ids=show_ids,
+                                       window_title=window_title)

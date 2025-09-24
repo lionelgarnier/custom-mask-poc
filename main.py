@@ -16,7 +16,8 @@ import open3d as o3d
 from config import DEFAULT_FACE_CONTOUR_LANDMARKS, DEFAULT_VISUALIZATION_SETTINGS, DEFAULT_PRINTING_SETTINGS, DEFAULT_FILE_SETTINGS, DEFAULT_MODEL, OUTPUT_FOLDER
 from face import extract_face_landmarks, extract_average_face_landmarks_from_video, compute_rigid_transform_parameters, compute_similarity_transform_parameters
 from visualization import (visualize_2d_landmarks, visualize_3d_landmarks, 
-                          visualize_mesh_with_landmarks, visualize_contact_line)
+                          visualize_mesh_with_landmarks, visualize_contact_line,
+                          show_face_with_landmarks_3d)
 from utils import create_pyvista_mesh
 
 def select_mesh_file(default_folder=None):
@@ -96,16 +97,9 @@ def process_face(mesh_path,
     # Process the face to extract landmarks and contour
     face_mesh, face_landmarks, valid_indices = extract_face_landmarks(mesh_path)
     
-    # # Display the extracted image color on the screen
-    # keep_indices = None
-    # landmarks_plotter = pv.Plotter()
-    # landmarks_plotter.add_title("Face Mesh with Landmarks")
-    # landmarks_plotter = visualize_mesh_with_landmarks(landmarks_plotter, face_mesh, face_landmarks, valid_indices, keep_indices)
-    
-    # landmarks_plotter.view_xy()  # Set to front view (looking at XY plane)
-    # landmarks_plotter.enable_zoom_style()
-    # landmarks_plotter.enable_trackball_style()
-    # landmarks_plotter.show()
+    # Optional: interactive 3D mesh + landmarks viewer
+    if show_landmarks_3d:
+        show_face_with_landmarks_3d(face_mesh, face_landmarks, valid_indices, keep_ids=None, show_ids=True)
     
     # Create 3D printable object if requested
     if create_3d_print:

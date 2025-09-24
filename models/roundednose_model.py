@@ -6,8 +6,9 @@ from utils import (create_pyvista_mesh, repair_mesh, clean_and_smooth, thicken_m
                    fix_surface_normals_at_interface, remove_surface_within_area, deform_surface_at_point,
                    compute_rotation_between_vectors, extrude_mesh, reorder_line_points, 
                    rotate_shape_and_landmarks, translate_shape_and_landmarks,
-                  get_landmark, loft_between_line_points, extrude_tube_on_face_along_line,
-                  extract_line_from_landmarks, get_tangent_points, advanced_smooth_mesh, smooth_line_points)
+                   get_landmark, loft_between_line_points, extrude_tube_on_face_along_line,
+                  extract_line_from_landmarks, get_tangent_points, advanced_smooth_mesh, smooth_line_points,
+                  get_surface_within_area, orient_normals_z_up, apply_preload_to_contact_surface)
 from shapes.n5_connector import N5Connector
 
 class RoundedNoseModel(Face3DObjectModel):
@@ -33,8 +34,11 @@ class RoundedNoseModel(Face3DObjectModel):
         
         # Nose model
         # shape_landmarks = [197, 437, 371, 423, 391, 393, 164, 167, 165, 203, 142, 217, 197] 
-        shape_landmarks = [6, 437, 371, 423, 391, 393, 164, 167, 165, 203, 142, 217, 6] 
-        
+        # shape_landmarks = [6, 437, 371, 423, 391, 393, 164, 167, 165, 203, 142, 217, 6] # Test 1 Face Mika
+        shape_landmarks = [6, 351, 412, 277, 371, 423, 391, 393, 164, 167, 165, 203, 142, 47, 188, 122, 6] 
+        shape_hole_landmarks = [195, 456, 429, 279, 331, 327, 326, 2, 97, 98, 129, 49, 209, 236, 195]
+
+
         # Mouth model
         # shape_landmarks = [197, 437, 371, 266, 425, 427, 434, 430, 431, 418, 421, 200, 201, 194, 211, 210, 214, 207, 205, 36, 142, 217, 197] 
         # shape_landmarks = [8, 417, 464, 453, 350, 266, 426, 436, 432, 422, 424, 418, 421, 200, 201, 194, 204, 202, 212, 216, 206, 36, 121, 233, 244, 193, 8] # Large Nose
@@ -47,6 +51,23 @@ class RoundedNoseModel(Face3DObjectModel):
         # Tubular contact with face
         shape_points_3d, shape_normals = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_landmarks) 
 
+        shape_hole_points_3d, shape_hole_normals = extract_line_from_landmarks(face_mesh, face_landmarks, face_landmarks_ids, shape_hole_landmarks) 
+
+
+        contact_surface, _ = get_surface_within_area(face_mesh, shape_points_3d)
+        contact_surface = remove_surface_within_area(contact_surface, shape_hole_points_3d)
+        # Apply preload by offsetting the inner region toward the face
+        contact_surface = apply_preload_to_contact_surface(
+            contact_surface,
+            face_mesh,
+            shape_hole_points_3d,
+            shape_points_3d,
+            preload_mm=1
+        )
+        # Force normals to +Z before thickening for consistent extrusion direction
+        contact_surface = orient_normals_z_up(contact_surface)
+
+
         tube_surface, tube_top_points, cross_sections = extrude_tube_on_face_along_line(shape_points_3d, shape_normals, 3.0)
         
         
@@ -56,13 +77,13 @@ class RoundedNoseModel(Face3DObjectModel):
         connector = shape_builder.create_3d_object()
 
         # Locate face landmarks defining horizontal and vertical alignments (x= vertical, y=horizontal)
-        landmark_x1 = get_landmark(face_landmarks, face_landmarks_ids, 94)
+        landmark_x1 = get_landmark(face_landmarks, face_landmarks_ids, 164)
         landmark_x2 = get_landmark(face_landmarks, face_landmarks_ids, 6)
         vector_x = landmark_x2 - landmark_x1
         vector_x /= np.linalg.norm(vector_x)
 
-        landmark_y1 = get_landmark(face_landmarks, face_landmarks_ids, 117) # Coin paumette gauche
-        landmark_y2 = get_landmark(face_landmarks, face_landmarks_ids, 346) # Coin paumette droite
+        landmark_y1 = get_landmark(face_landmarks, face_landmarks_ids, 142) # Coin paumette gauche
+        landmark_y2 = get_landmark(face_landmarks, face_landmarks_ids, 371) # Coin paumette droite
         vector_y = landmark_y2 - landmark_y1
         vector_y /= np.linalg.norm(vector_y)
 
@@ -109,8 +130,8 @@ class RoundedNoseModel(Face3DObjectModel):
         
         # Build the shape to join nose surface with connector
         p0 = connector.landmarks[1] # Center Bottom
-        px = connector.landmarks[7] # Inside Right Bottom
-        py = connector.landmarks[9] # Inside Top Bottom
+        px = connector.landmarks[3] # Outside Right Bottom
+        py = connector.landmarks[5] # Outside Top Bottom
         pz = connector.landmarks[2] # Center Top
 
         # radius = np.linalg.norm(px - p0)
@@ -137,19 +158,25 @@ class RoundedNoseModel(Face3DObjectModel):
         tangent_surface = loft_between_line_points(circle_points, tangent_points)
 
         merged_surface = loft_between_line_points(tube_top_points, tangent_points)
-        tube_surface = tube_surface.clip_surface(merged_surface, invert=True)
+        # tube_surface = tube_surface.clip_surface(merged_surface, invert=True)
 
         # Thicken the surface with variable thickness
-        volume = thicken_combined_surface_with_zones(
-            tube_surface=tube_surface, 
-            tangent_surface=tangent_surface,
-            tube_thickness_start=2.0,        # Thickness of the tangent surface
-            tube_thickness_end=0.5,       # Thickness of the tube surface  
-            tube_top_points=tube_top_points, 
-            circle_points=circle_points
-        )
+        # volume = thicken_combined_surface_with_zones(
+        #     tube_surface=tube_surface, 
+        #     tangent_surface=tangent_surface,
+        #     tube_thickness_start=2.0,        # Thickness of the tangent surface
+        #     tube_thickness_end=2.0,       # Thickness of the tube surface  
+        #     # tube_thickness_end=0.5,       # Thickness of the tube surface  
+        #     tube_top_points=tube_top_points, 
+        #     circle_points=circle_points
+        # )
         
-            # Add the connector
+        tube_surface = thicken_mesh_vtk(tube_surface, 2.0, True)   
+        tangent_surface = thicken_mesh_vtk(tangent_surface, 3.0, True)  
+        contact_surface = thicken_mesh_vtk(contact_surface, 0.5)  
+        # contact_surface.translate((0, 0, -2), inplace=True)
+        volume = tube_surface + tangent_surface + contact_surface
+        # Add the connector
         volume = volume + connector
 
         # Extract surface and repair holes/gaps between volumes
@@ -198,11 +225,11 @@ class RoundedNoseModel(Face3DObjectModel):
         # plotter.add_mesh(join_surface, color='yellow', opacity=0.4, show_edges=True)
         # plotter.add_mesh(tangent_volume, color='yellow', opacity=0.4, show_edges=True)
         # plotter.add_mesh(tube_volume, color='orange', opacity=0.5, show_edges=True)
-        # plotter.add_mesh(connector, color='red', opacity=0.5, show_edges=True)
+        # plotter.add_mesh(contact_surface, color='red', opacity=0.5, show_edges=True)
         # plotter.add_mesh(volume, color='orange', opacity=0.5, show_edges=True)
-        # plotter.add_mesh(pv.PolyData(tube_top_points), color='red', point_size=3, render_points_as_spheres=True)
+        # plotter.add_mesh(pv.PolyData(shape_hole_points_3d), color='red', point_size=3, render_points_as_spheres=True)
         # Add point IDs for join_contact_line_points
-        # for i, point in enumerate(tube_top_points):
+        # for i, point in enumerate(shape_hole_landmarks):
         #     plotter.add_point_labels(
         #         point, 
         #         [f"{i}"], 

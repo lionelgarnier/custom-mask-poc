@@ -14,7 +14,7 @@ import tempfile
 import os
 import trimesh
 from functools import singledispatch
-from scipy.spatial import (Delaunay, ConvexHull)
+from scipy.spatial import (Delaunay, ConvexHull, cKDTree)
 
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
@@ -225,6 +225,42 @@ def translate_mesh_mr(mesh: mr.Mesh, translation_vector) -> mr.Mesh:
     # Invalidate any cached topology/geometry if needed
     mesh.invalidateCaches()
     return mesh
+
+def orient_normals_towards_vector(surface: pv.PolyData, target_direction: np.ndarray = np.array([0.0, 0.0, 1.0])) -> pv.PolyData:
+    """
+    Ensure surface point normals are consistently oriented toward a target direction
+    (default +Z). If the average normal has a negative dot with target, flip normals.
+
+    Returns a new PolyData with updated normals and corrected face winding.
+    """
+    if not isinstance(surface, pv.PolyData):
+        return surface
+
+    result = surface.copy()
+    # Compute normals if missing
+    if "Normals" not in result.point_data:
+        result = result.compute_normals(auto_orient_normals=True)
+
+    normals = result.point_data["Normals"]
+    if normals.size == 0:
+        result = result.compute_normals(auto_orient_normals=True)
+        normals = result.point_data["Normals"]
+
+    avg_normal = np.mean(normals, axis=0)
+    if np.linalg.norm(avg_normal) < 1e-12:
+        return result
+
+    target = target_direction / np.linalg.norm(target_direction)
+    if np.dot(avg_normal, target) < 0.0:
+        # Flip normals and face winding, then recompute normals for consistency
+        result.flip_normals()
+        result = result.compute_normals(auto_orient_normals=False)
+
+    return result
+
+def orient_normals_z_up(surface: pv.PolyData) -> pv.PolyData:
+    """Convenience wrapper to orient normals toward +Z."""
+    return orient_normals_towards_vector(surface, np.array([0.0, 0.0, 1.0]))
 
 def thicken_combined_surface_with_zones(tube_surface: pv.PolyData, tangent_surface: pv.PolyData, 
                                         tube_thickness_start: float, tube_thickness_end: float, 
@@ -1379,22 +1415,81 @@ def loft_between_line_points(source_points1, source_points2, close = True):
 
 
 
+def apply_preload_to_contact_surface(contact_surface: pv.PolyData,
+                                     face_mesh: pv.PolyData,
+                                     inner_curve: np.ndarray,
+                                     outer_curve: np.ndarray,
+                                     preload_mm: float = 0.6,
+                                     inner_tolerance: float = 0.25) -> pv.PolyData:
+    """
+    Offset the contact surface toward the face to enforce a preload around the inner curve.
+
+    The displacement is 0.0 mm on the outer curve and increases linearly up to `preload_mm`
+    on the inner curve, following the direction of the facial normals.
+    """
+
+    if "Normals" not in face_mesh.point_data:
+        face_mesh = face_mesh.compute_normals()
+
+    # Copy to avoid mutating input
+    result = contact_surface.copy()
+    points = result.points.copy()
+
+    # KD-trees for nearest neighbour lookups
+    face_tree = cKDTree(face_mesh.points)
+    inner_tree = cKDTree(inner_curve)
+    outer_tree = cKDTree(outer_curve)
+
+    # Fetch normals from face mesh for each surface vertex
+    _, face_idx = face_tree.query(points)
+    normals = face_mesh.point_data["Normals"][face_idx]
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms[norms < 1e-8] = 1.0
+    normals = normals / norms
+
+    # Distance-based interpolation weight (1.0 on inner curve, 0.0 on outer curve)
+    inner_dist, _ = inner_tree.query(points)
+    outer_dist, _ = outer_tree.query(points)
+    total = inner_dist + outer_dist
+    weights = np.divide(outer_dist, total, out=np.zeros_like(total), where=total > 1e-6)
+
+    # Clamp extremes explicitly for numerical robustness
+    weights[outer_dist < inner_tolerance] = 0.0
+    weights[inner_dist < inner_tolerance] = 1.0
+
+    displacement = -preload_mm * weights[:, None] * normals
+    points += displacement
+
+    result.points = points
+    result = result.clean(tolerance=1e-5)
+    result = result.compute_normals(auto_orient_normals=True)
+
+    return result
+
 def extrude_tube_on_face_along_line(line_points: np.ndarray,
                                            face_normals: np.ndarray,
                                            radius: float,
                                            n_cs_points: int = 20,
-                                           y_ratio: float = 1.0) :
-
+                                           y_ratio: float = 1.0,
+                                           start_angle: float = 0,
+                                           end_angle: float = 2 * np.pi,
+                                           top_angle: float | None = None) :
 
     N = line_points.shape[0]
     if face_normals.shape[0] != N:
         raise ValueError("line_points and face_normals must have the same number of points.")
     
-    # Define half circle in local coordinates.
-    # Using theta in [0, π/2] produces a half circle.
-    # (For a full half tube, you might use the range [0, π], but here we assume
-    # that the half cross-section is defined over [0, π/2] for your specific case.)
-    angles = np.linspace(0, np.pi*2, n_cs_points)
+    # Define circular arc in local coordinates from start_angle to end_angle.
+    # If the span is a full circle, avoid duplicating the last point by using endpoint=False.
+    angle_span = end_angle - start_angle
+    # Normalize span to [0, 2π]
+    two_pi = 2.0 * np.pi
+    span_mod = np.fmod(angle_span, two_pi)
+    if span_mod < 0:
+        span_mod += two_pi
+    is_full_circle = np.isclose(span_mod, 0.0) or np.isclose(span_mod, two_pi)
+
+    angles = np.linspace(start_angle, end_angle, n_cs_points, endpoint=not is_full_circle)
     local_cs = np.column_stack((radius * np.cos(angles),
                                 radius * np.sin(angles) * y_ratio))  # shape: (n_cs_points, 2)
         
@@ -1460,9 +1555,9 @@ def extrude_tube_on_face_along_line(line_points: np.ndarray,
                                for pt in local_cs ])
         cross_sections.append(cs_global)
                 
-        # The "top" of the half circle corresponds to local coordinates (0, radius) (theta = π/2).
-        angle = 7 * np.pi / 4
-        top_point = (p - radius * U) + radius * V * np.sin(angle) * y_ratio + radius * U * np.cos(angle)
+        # Choose a representative "top" point on the section: by default the arc midpoint.
+        angle = top_angle if top_angle is not None else (start_angle + end_angle) * 0.5
+        top_point = (p - radius * U) + (radius * np.cos(angle)) * U + (radius * np.sin(angle) * y_ratio) * V
         top_points_list.append(top_point)
     
     # Assemble all cross-section points into a single vtkPoints object.
@@ -1478,27 +1573,49 @@ def extrude_tube_on_face_along_line(line_points: np.ndarray,
     # Build connectivity: create quad cells connecting adjacent cross-sections.
     cells = vtk.vtkCellArray()
 
+    # Connectivity along the path (i dimension) and around the section (j dimension).
+    # Around the section: if full circle, wrap j; otherwise, stop at j = n_cs_points - 2.
     if closed_loop:
-        # Wrap-around connectivity: i goes from 0 to N-1, with next = (i+1) mod N.
+        # Wrap-around connectivity in i: i goes from 0 to N-1, with next = (i+1) mod N.
         for i in range(N):
             next_i = (i + 1) % N
-            for j in range(n_cs_points - 1):
-                quad = vtk.vtkQuad()
-                quad.GetPointIds().SetId(0, i * n_cs_points + j)
-                quad.GetPointIds().SetId(1, i * n_cs_points + j + 1)
-                quad.GetPointIds().SetId(2, next_i * n_cs_points + j + 1)
-                quad.GetPointIds().SetId(3, next_i * n_cs_points + j)
-                cells.InsertNextCell(quad)
+            if is_full_circle:
+                for j in range(n_cs_points):
+                    next_j = (j + 1) % n_cs_points
+                    quad = vtk.vtkQuad()
+                    quad.GetPointIds().SetId(0, i * n_cs_points + j)
+                    quad.GetPointIds().SetId(1, i * n_cs_points + next_j)
+                    quad.GetPointIds().SetId(2, next_i * n_cs_points + next_j)
+                    quad.GetPointIds().SetId(3, next_i * n_cs_points + j)
+                    cells.InsertNextCell(quad)
+            else:
+                for j in range(n_cs_points - 1):
+                    quad = vtk.vtkQuad()
+                    quad.GetPointIds().SetId(0, i * n_cs_points + j)
+                    quad.GetPointIds().SetId(1, i * n_cs_points + j + 1)
+                    quad.GetPointIds().SetId(2, next_i * n_cs_points + j + 1)
+                    quad.GetPointIds().SetId(3, next_i * n_cs_points + j)
+                    cells.InsertNextCell(quad)
     else:
         # Non-closed centerline: i goes from 0 to N-2.
         for i in range(N - 1):
-            for j in range(n_cs_points - 1):
-                quad = vtk.vtkQuad()
-                quad.GetPointIds().SetId(0, i * n_cs_points + j)
-                quad.GetPointIds().SetId(1, i * n_cs_points + j + 1)
-                quad.GetPointIds().SetId(2, (i + 1) * n_cs_points + j + 1)
-                quad.GetPointIds().SetId(3, (i + 1) * n_cs_points + j)
-                cells.InsertNextCell(quad)
+            if is_full_circle:
+                for j in range(n_cs_points):
+                    next_j = (j + 1) % n_cs_points
+                    quad = vtk.vtkQuad()
+                    quad.GetPointIds().SetId(0, i * n_cs_points + j)
+                    quad.GetPointIds().SetId(1, i * n_cs_points + next_j)
+                    quad.GetPointIds().SetId(2, (i + 1) * n_cs_points + next_j)
+                    quad.GetPointIds().SetId(3, (i + 1) * n_cs_points + j)
+                    cells.InsertNextCell(quad)
+            else:
+                for j in range(n_cs_points - 1):
+                    quad = vtk.vtkQuad()
+                    quad.GetPointIds().SetId(0, i * n_cs_points + j)
+                    quad.GetPointIds().SetId(1, i * n_cs_points + j + 1)
+                    quad.GetPointIds().SetId(2, (i + 1) * n_cs_points + j + 1)
+                    quad.GetPointIds().SetId(3, (i + 1) * n_cs_points + j)
+                    cells.InsertNextCell(quad)
     
     # Create the output vtkPolyData.
     polydata = vtk.vtkPolyData()
@@ -1629,7 +1746,7 @@ def extract_line_from_landmarks(mesh, landmarks, landmark_indices, contour_landm
 
 
     bounds = mesh.bounds
-    dz = 100
+    dz = 200
     projected_line_points = []
     projected_normals = []
     for pt in line_points:
